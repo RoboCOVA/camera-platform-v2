@@ -1,0 +1,67 @@
+# local-dev/docker-compose.override.yml
+# Overrides for running on macOS locally.
+# Disables TLS, WireGuard, Grafana, and Caddy.
+# Exposes all ports directly on localhost.
+
+services:
+  keycloak:
+    # start-dev skips TLS requirements and enables dev features
+    command: >
+      start-dev
+      --health-enabled=true
+      --db postgres
+      --db-url jdbc:postgresql://postgres/camplatform
+      --db-username cam
+      --db-password devpassword
+    environment:
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_LOG_LEVEL: warn
+    ports:
+      - "9000:9000"   # management/health port for external health checks
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  postgres:
+    ports:
+      - "5432:5432"   # expose for direct psql access during dev
+
+  api:
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: camplatform
+      MQTT_BROKER: mqtt://mosquitto:1883
+      MQTT_USER: camapi
+      MQTT_PASSWORD: devmqttpass
+      DATABASE_URL: postgres://cam:devpassword@postgres/camplatform?sslmode=disable
+      DEVICE_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      LOG_LEVEL: debug
+
+  dashboard:
+    ports:
+      - "3000:3000"
+
+  # Disable services not needed locally
+  wireguard:
+    profiles: ["disabled"]
+
+  caddy:
+    profiles: ["disabled"]
+
+  grafana:
+    profiles: ["disabled"]
+
+  prometheus:
+    profiles: ["disabled"]

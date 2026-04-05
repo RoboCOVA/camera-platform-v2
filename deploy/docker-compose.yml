@@ -1,0 +1,247 @@
+version: "3.9"
+
+# ─── Networks ────────────────────────────────────────────────────────────────
+networks:
+  internal:
+    driver: bridge
+  public:
+    driver: bridge
+
+# ─── Volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  keycloak_data:
+  mosquitto_data:
+  mosquitto_logs:
+  caddy_data:
+  caddy_config:
+
+# ─── Services ────────────────────────────────────────────────────────────────
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cam_postgres
+    restart: unless-stopped
+    networks: [internal]
+    environment:
+      POSTGRES_DB: camplatform
+      POSTGRES_USER: cam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cam -d camplatform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: cam_keycloak
+    restart: unless-stopped
+    networks: [internal, public]
+    command: >
+      start
+      --import-realm
+      --db postgres
+      --db-url jdbc:postgresql://postgres/camplatform
+      --db-username cam
+      --db-password ${POSTGRES_PASSWORD}
+      --hostname auth.${DOMAIN}
+      --hostname-strict true
+      --proxy edge
+      --http-enabled true
+      --http-port 8080
+    environment:
+      KEYCLOAK_ADMIN: ${KC_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      KC_LOG_LEVEL: warn
+    volumes:
+      - ./keycloak/realm.resolved.json:/opt/keycloak/data/import/realm.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: cam_mosquitto
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_logs:/mosquitto/log
+    ports:
+      - "127.0.0.1:1883:1883"
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-p", "1883", "-u", "${MQTT_API_USER}", "-P", "${MQTT_API_PASSWORD}", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build:
+      context: ../control-plane
+      dockerfile: Dockerfile
+    container_name: cam_api
+    restart: unless-stopped
+    networks: [internal, public]
+    environment:
+      DATABASE_URL: postgres://cam:${POSTGRES_PASSWORD}@postgres/camplatform?sslmode=disable
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/camplatform
+      KEYCLOAK_REALM: camplatform
+      MQTT_BROKER: mqtt://mosquitto:1883
+      MQTT_USER: ${MQTT_API_USER}
+      MQTT_PASSWORD: ${MQTT_API_PASSWORD}
+      DOMAIN: ${DOMAIN}
+      DEVICE_SECRET: ${DEVICE_SECRET}
+      WG_SERVER_PUBLIC_KEY: ${WG_SERVER_PUBLIC_KEY}
+      WG_DOCKER_CONTAINER: ${WG_DOCKER_CONTAINER:-cam_wireguard}
+      WG_INTERFACE: ${WG_INTERFACE:-wg0}
+      INSTALL_SCRIPT_PATH: /app/install-agent.sh
+      RELEASES_DIR: /app/releases
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      LOG_LEVEL: info
+    volumes:
+      - ./install-agent.sh:/app/install-agent.sh:ro
+      - ./releases:/app/releases:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "127.0.0.1:3001:3001"
+
+  dashboard:
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
+        NEXT_PUBLIC_KC_URL: https://auth.${DOMAIN}
+        NEXT_PUBLIC_KC_REALM: camplatform
+        NEXT_PUBLIC_KC_CLIENT_ID: cam-dashboard
+    container_name: cam_dashboard
+    restart: unless-stopped
+    networks: [internal, public]
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
+      NEXT_PUBLIC_KC_URL: https://auth.${DOMAIN}
+      NEXT_PUBLIC_KC_REALM: camplatform
+      NEXT_PUBLIC_KC_CLIENT_ID: cam-dashboard
+      KEYCLOAK_CLIENT_ID: cam-dashboard
+      KEYCLOAK_CLIENT_SECRET: ${CAM_DASHBOARD_SECRET}
+      KEYCLOAK_ISSUER: https://auth.${DOMAIN}/realms/camplatform
+      NEXTAUTH_URL: https://app.${DOMAIN}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: cam_caddy
+    restart: unless-stopped
+    networks: [public]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN}
+    depends_on:
+      - api
+      - dashboard
+      - keycloak
+
+  wireguard:
+    image: linuxserver/wireguard:latest
+    container_name: cam_wireguard
+    restart: unless-stopped
+    networks: [internal]
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+      SERVERURL: ${DOMAIN}
+      SERVERPORT: 51820
+      PEERS: 0
+      PEERDNS: auto
+      ALLOWEDIPS: 10.10.0.0/24
+      LOG_CONFS: false
+    volumes:
+      - ./wireguard:/config
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - "51820:51820/udp"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cam_prometheus
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cam_grafana
+    restart: unless-stopped
+    networks: [internal, public]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_SERVER_ROOT_URL: https://metrics.${DOMAIN}
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: Keycloak
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: grafana
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://auth.${DOMAIN}/realms/camplatform/protocol/openid-connect/auth
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://keycloak:8080/realms/camplatform/protocol/openid-connect/token
+    volumes:
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    ports:
+      - "127.0.0.1:3000:3000"

@@ -1,0 +1,303 @@
+{
+  "realm": "camplatform",
+  "displayName": "Cam Platform",
+  "displayNameHtml": "<strong>Cam Platform</strong>",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+
+  "defaultSignatureAlgorithm": "RS256",
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 1800,
+
+  "roles": {
+    "realm": [
+      {
+        "name": "org-owner",
+        "description": "Full control over the organization",
+        "composite": false
+      },
+      {
+        "name": "org-admin",
+        "description": "Can manage cameras, sites, users",
+        "composite": false
+      },
+      {
+        "name": "site-manager",
+        "description": "Can view and manage assigned sites",
+        "composite": false
+      },
+      {
+        "name": "viewer",
+        "description": "Read-only access to cameras and events",
+        "composite": false
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "cam-dashboard",
+      "name": "Cam Dashboard",
+      "description": "Next.js web dashboard",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${CAM_DASHBOARD_SECRET}",
+      "redirectUris": [
+        "https://app.${DOMAIN}/api/auth/callback/keycloak",
+        "http://localhost:3000/api/auth/callback/keycloak"
+      ],
+      "webOrigins": [
+        "https://app.${DOMAIN}",
+        "http://localhost:3000"
+      ],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "openid",
+        "email",
+        "profile",
+        "org-claims"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access"
+      ],
+      "protocolMappers": [
+        {
+          "name": "org_id mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "org_id",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "org_id",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "site_ids mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "site_ids",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "site_ids",
+            "jsonType.label": "String",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "roles mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "audience mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "cam-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+
+    {
+      "clientId": "cam-api",
+      "name": "Cam API",
+      "description": "Backend API resource server",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${CAM_API_SECRET}",
+      "bearerOnly": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false
+    },
+
+    {
+      "clientId": "cam-mobile",
+      "name": "Cam Mobile App",
+      "description": "React Native mobile app (public PKCE client)",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "camplatform://auth/callback",
+        "exp://localhost:8081/--/auth/callback"
+      ],
+      "webOrigins": ["*"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": [
+        "openid", "email", "profile", "org-claims"
+      ]
+    },
+
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${GRAFANA_KC_SECRET}",
+      "redirectUris": ["https://metrics.${DOMAIN}/login/generic_oauth"],
+      "standardFlowEnabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect"
+    }
+  ],
+
+  "clientScopes": [
+    {
+      "name": "org-claims",
+      "description": "Organization-specific claims",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "org_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "org_id",
+            "claim.name": "org_id",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "google",
+      "displayName": "Google",
+      "providerId": "google",
+      "enabled": false,
+      "updateProfileFirstLoginMode": "on",
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "config": {
+        "clientId": "${GOOGLE_CLIENT_ID}",
+        "clientSecret": "${GOOGLE_CLIENT_SECRET}",
+        "defaultScope": "openid email profile",
+        "syncMode": "IMPORT"
+      }
+    },
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft / Azure AD",
+      "providerId": "microsoft",
+      "enabled": false,
+      "updateProfileFirstLoginMode": "on",
+      "trustEmail": true,
+      "config": {
+        "clientId": "${AZURE_CLIENT_ID}",
+        "clientSecret": "${AZURE_CLIENT_SECRET}",
+        "defaultScope": "openid email profile",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
+
+  "authenticationFlows": [],
+
+  "smtpServer": {
+    "host": "${SMTP_HOST}",
+    "port": "${SMTP_PORT}",
+    "from": "noreply@${DOMAIN}",
+    "fromDisplayName": "Cam Platform",
+    "starttls": "true",
+    "auth": "true",
+    "user": "${SMTP_USER}",
+    "password": "${SMTP_PASSWORD}"
+  },
+
+  "loginTheme": "keycloak",
+  "accountTheme": "keycloak.v3",
+  "adminTheme": "keycloak",
+  "emailTheme": "keycloak",
+
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "enabledEventTypes": [
+    "LOGIN",
+    "LOGIN_ERROR",
+    "LOGOUT",
+    "REGISTER",
+    "RESET_PASSWORD",
+    "UPDATE_PASSWORD",
+    "UPDATE_EMAIL",
+    "REMOVE_TOTP",
+    "GRANT_CONSENT",
+    "REVOKE_GRANT"
+  ],
+
+  "internationalizationEnabled": true,
+  "supportedLocales": ["en"],
+  "defaultLocale": "en",
+
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and notUsername",
+
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyInitialCounter": 0,
+  "otpPolicyDigits": 6,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyPeriod": 30
+}

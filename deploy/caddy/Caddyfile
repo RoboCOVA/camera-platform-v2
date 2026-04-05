@@ -1,0 +1,78 @@
+# Caddy automatically provisions and renews TLS certificates via Let's Encrypt.
+# Replace {$DOMAIN} — Caddy reads it from the DOMAIN environment variable.
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+app.{$DOMAIN} {
+  reverse_proxy cam_dashboard:3000
+
+  # Security headers
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Frame-Options DENY
+    X-Content-Type-Options nosniff
+    Referrer-Policy strict-origin-when-cross-origin
+    Permissions-Policy "camera=(), microphone=()"
+    -Server
+  }
+
+  encode zstd gzip
+}
+
+# ── Control plane API ─────────────────────────────────────────────────────────
+api.{$DOMAIN} {
+  reverse_proxy cam_api:3001
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options nosniff
+    -Server
+  }
+
+  # Rate limit device heartbeats (prevent abuse)
+  # Caddy rate limit module: https://caddyserver.com/docs/modules/http.handlers.rate_limit
+  # Install: xcaddy build --with github.com/mholt/caddy-ratelimit
+  # rate_limit {
+  #   zone api_zone {
+  #     key {remote_host}
+  #     events 100
+  #     window 1m
+  #   }
+  # }
+
+  encode zstd gzip
+}
+
+# ── Keycloak (auth) ───────────────────────────────────────────────────────────
+auth.{$DOMAIN} {
+  reverse_proxy cam_keycloak:8080 {
+    # Keycloak needs the original host header
+    header_up Host {host}
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    -Server
+  }
+}
+
+# ── Grafana (metrics, internal team only) ─────────────────────────────────────
+metrics.{$DOMAIN} {
+  reverse_proxy cam_grafana:3000
+
+  # Restrict to your IP range in production
+  # @blocked not remote_ip 1.2.3.4/32
+  # respond @blocked 403
+
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    -Server
+  }
+}
+
+# ── Redirect www to apex ──────────────────────────────────────────────────────
+www.{$DOMAIN} {
+  redir https://{$DOMAIN}{uri} permanent
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "sim-cam-001",
+    "name": "Simulated Camera 1",
+    "manufacturer": "Test",
+    "model": "Virtual-RTSP",
+    "serial": "SIM-001",
+    "ip": "127.0.0.1",
+    "main_stream_url": "rtsp://localhost:8554/cam1",
+    "sub_stream_url": "rtsp://localhost:8554/cam1",
+    "width": 1280,
+    "height": 720
+  },
+  {
+    "id": "sim-cam-002",
+    "name": "Simulated Camera 2",
+    "manufacturer": "Test",
+    "model": "Virtual-RTSP",
+    "serial": "SIM-002",
+    "ip": "127.0.0.1",
+    "main_stream_url": "rtsp://localhost:8554/cam2",
+    "sub_stream_url": "rtsp://localhost:8554/cam2",
+    "width": 1280,
+    "height": 720
+  }
+]
