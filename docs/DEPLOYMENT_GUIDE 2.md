@@ -259,6 +259,23 @@ docker ps --format '{{.Names}}'
 docker logs cam_api --tail 100
 ```
 
+## Multi-Site Deployment (Short)
+
+This platform supports multi-site natively. Each site has its own edge node(s) and cameras, while the central control plane aggregates events and live views across all sites.
+
+Recommended pattern:
+
+```
+[Sites] → [Edge Nodes + Frigate] → WireGuard → [Regional Hub (optional)] → [Central Control Plane]
+```
+
+Guidance:
+
+- Create one **Site** per physical location.
+- Issue one **Provisioning Token** per site (or per edge device).
+- Keep **Frigate** and recording **site-local**.
+- Aggregate metadata centrally; stream video only on demand.
+
 ## Phase 6: Install the Edge Device
 
 Run on the edge host:
