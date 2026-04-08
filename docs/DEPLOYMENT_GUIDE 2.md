@@ -220,6 +220,7 @@ Allow only:
 ### 2. Restrict Grafana
 
 Edit [`Caddyfile`](../deploy/caddy/Caddyfile) and restrict `metrics.<domain>` to trusted IPs, VPN, or internal access.
+Update `METRICS_ALLOWLIST` in `deploy/.env` with a CIDR list (e.g. `203.0.113.10/32 198.51.100.0/24`).
 
 ### 3. Backup plan
 

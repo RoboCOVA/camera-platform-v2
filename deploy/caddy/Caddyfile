@@ -62,9 +62,9 @@ auth.{$DOMAIN} {
 metrics.{$DOMAIN} {
   reverse_proxy cam_grafana:3000
 
-  # Restrict to your IP range in production
-  # @blocked not remote_ip 1.2.3.4/32
-  # respond @blocked 403
+  # Restrict to your IP range in production (CIDR list)
+  @blocked not remote_ip {$METRICS_ALLOWLIST}
+  respond @blocked 403
 
   header {
     Strict-Transport-Security "max-age=31536000"

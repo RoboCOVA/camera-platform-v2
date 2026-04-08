@@ -54,6 +54,10 @@ export default function EventsPage() {
   const historicalEvents = eventPage?.items ?? []
   const total = eventPage?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+<<<<<<< HEAD
+=======
+  const pageNumbers = buildPageNumbers(page, totalPages)
+>>>>>>> fdc694e (added guides doc)
 
   useEffect(() => {
     if (page > totalPages - 1) setPage(0)
@@ -172,7 +176,11 @@ export default function EventsPage() {
             >
               Prev
             </button>
+<<<<<<< HEAD
             {Array.from({ length: totalPages }, (_, i) => i).slice(0, 7).map(p => (
+=======
+            {pageNumbers.map(p => (
+>>>>>>> fdc694e (added guides doc)
               <button
                 key={p}
                 onClick={() => setPage(p)}
@@ -187,7 +195,11 @@ export default function EventsPage() {
                 {p + 1}
               </button>
             ))}
+<<<<<<< HEAD
             {totalPages > 7 && (
+=======
+            {totalPages > pageNumbers.length && (
+>>>>>>> fdc694e (added guides doc)
               <span style={{ color: '#64748b', fontSize: 12, padding: '0 6px' }}>…</span>
             )}
             <button
@@ -286,4 +298,15 @@ function EventCard({ id, type, label, score, snapshotUrl, startedAt, camera, isN
       </div>
     </div>
   )
+}
+
+function buildPageNumbers(current: number, total: number) {
+  const max = 7
+  if (total <= max) return Array.from({ length: total }, (_, i) => i)
+  let start = Math.max(0, current - 2)
+  let end = Math.min(total - 1, start + max - 1)
+  if (end - start < max - 1) {
+    start = Math.max(0, end - (max - 1))
+  }
+  return Array.from({ length: end - start + 1 }, (_, i) => start + i)
 }

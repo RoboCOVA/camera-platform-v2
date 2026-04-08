@@ -40,13 +40,11 @@ export default function CamerasPage() {
     const disconnect = connectEventStream(
       session.accessToken,
       (event: WSEvent) => {
-        // Update live status
         if (event.event_type === 'offline') {
           setLiveStatuses(s => ({ ...s, [event.camera_id]: 'offline' }))
         } else {
           setLiveStatuses(s => ({ ...s, [event.camera_id]: 'online' }))
         }
-        // Track most recent event per camera
         setRecentEvents(e => ({ ...e, [event.camera_id]: event }))
       },
       setWsConnected
@@ -59,6 +57,16 @@ export default function CamerasPage() {
   }, [selectedSite])
 
   const cameras = cameraPage?.items ?? []
+
+  const total = cameraPage?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const pageNumbers = buildPageNumbers(page, totalPages)
+
+  useEffect(() => {
+    if (page > totalPages - 1) setPage(0)
+  }, [page, totalPages])
+
+>>>>>>> fdc694e (added guides doc)
   const sites = siteList ?? []
   const total = cameraPage?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -75,6 +83,8 @@ export default function CamerasPage() {
   useEffect(() => {
     if (page > totalPages - 1) setPage(0)
   }, [page, totalPages])
+
+  const canAdmin = (session?.roles ?? []).some(r => r === 'org-owner' || r === 'org-admin')
 
   return (
     <div style={{ padding: '24px 28px', minHeight: '100vh' }}>
@@ -252,7 +262,11 @@ export default function CamerasPage() {
             >
               Prev
             </button>
+
             {Array.from({ length: totalPages }, (_, i) => i).slice(0, 7).map(p => (
+=======
+            {pageNumbers.map(p => (
+>>>>>>> fdc694e (added guides doc)
               <button
                 key={p}
                 onClick={() => setPage(p)}
@@ -267,7 +281,11 @@ export default function CamerasPage() {
                 {p + 1}
               </button>
             ))}
+
             {totalPages > 7 && (
+
+            {totalPages > pageNumbers.length && (
+>>>>>>> fdc694e (added guides doc)
               <span style={{ color: '#64748b', fontSize: 12, padding: '0 6px' }}>…</span>
             )}
             <button
@@ -325,64 +343,38 @@ function CameraListView({ cameras, liveStatuses, recentEvents, onSelect }: {
   onSelect: (c: Camera) => void
 }) {
   return (
-    <div style={{ border: '1px solid #1e2535', borderRadius: 10, overflow: 'hidden' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ background: '#161b27', borderBottom: '1px solid #1e2535' }}>
-            {['Name', 'Status', 'Model', 'IP', 'Last event'].map(h => (
-              <th key={h} style={{
-                padding: '10px 16px', textAlign: 'left',
-                fontSize: 11, fontWeight: 500, color: '#64748b',
-                textTransform: 'uppercase', letterSpacing: '0.05em',
-              }}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {cameras.map((cam, i) => {
-            const status = liveStatuses[cam.id] ?? cam.status
-            const lastEvent = recentEvents[cam.id]
-            return (
-              <tr
-                key={cam.id}
-                onClick={() => onSelect(cam)}
-                style={{
-                  borderBottom: i < cameras.length - 1 ? '1px solid #1e2535' : 'none',
-                  cursor: 'pointer',
-                  transition: 'background .1s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = '#161b27')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <td style={{ padding: '12px 16px', color: '#e2e8f0', fontSize: 13, fontWeight: 500 }}>
-                  {cam.name}
-                </td>
-                <td style={{ padding: '12px 16px' }}>
-                  <StatusDot status={status as any} />
-                </td>
-                <td style={{ padding: '12px 16px', color: '#94a3b8', fontSize: 13 }}>
-                  {cam.manufacturer} {cam.model}
-                </td>
-                <td style={{ padding: '12px 16px', color: '#64748b', fontSize: 12, fontFamily: 'monospace' }}>
-                  {cam.ip}
-                </td>
-                <td style={{ padding: '12px 16px', fontSize: 12, color: '#64748b' }}>
-                  {lastEvent ? (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <EventBadge type={lastEvent.event_type} />
-                      {formatDistanceToNow(new Date(lastEvent.timestamp), { addSuffix: true })}
-                    </span>
-                  ) : (
-                    cam.last_seen
-                      ? formatDistanceToNow(new Date(cam.last_seen), { addSuffix: true })
-                      : '—'
-                  )}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {cameras.map(cam => {
+        const liveStatus = liveStatuses[cam.id] ?? cam.status
+        const lastEvent = recentEvents[cam.id]
+        return (
+          <div
+            key={cam.id}
+            onClick={() => onSelect(cam)}
+            style={{
+              padding: 14, borderRadius: 10, border: '1px solid #1e2535',
+              background: '#161b27', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 12,
+            }}
+          >
+            <div style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: liveStatus === 'online' ? '#22c55e' : '#64748b',
+            }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#f1f5f9' }}>{cam.name}</div>
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                {cam.manufacturer} {cam.model} · {cam.ip}
+              </div>
+            </div>
+            {lastEvent && (
+              <div style={{ fontSize: 11, color: '#64748b' }}>
+                {formatDistanceToNow(new Date(lastEvent.timestamp), { addSuffix: true })}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -398,6 +390,7 @@ function CameraCreateModal({ sites, onClose, onCreated }: {
   const [manufacturer, setManufacturer] = useState('')
   const [model, setModel] = useState('')
   const [saving, setSaving] = useState(false)
+
 
   return (
     <div style={{
@@ -509,50 +502,152 @@ const inputStyle: CSSProperties = {
 }
 
 // ─── Small components ─────────────────────────────────────────────────────────
+=======
+>>>>>>> fdc694e (added guides doc)
 
-function StatusDot({ status }: { status: 'online' | 'offline' | 'error' }) {
-  const color = status === 'online' ? '#22c55e' : status === 'error' ? '#ef4444' : '#6b7280'
   return (
-    <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-      <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, display: 'inline-block' }} />
-      <span style={{ color: '#94a3b8', textTransform: 'capitalize' }}>{status}</span>
-    </span>
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 60,
+      background: 'rgba(0,0,0,0.7)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 20,
+    }}>
+      <div style={{
+        background: '#161b27',
+        border: '1px solid #1e2535',
+        borderRadius: 12,
+        width: '100%',
+        maxWidth: 520,
+        padding: 18,
+      }}>
+        <div style={{ fontSize: 16, fontWeight: 600, color: '#f1f5f9', marginBottom: 12 }}>
+          Add camera
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Camera name"
+            style={inputStyle}
+          />
+          <select
+            value={siteId}
+            onChange={e => setSiteId(e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">No site</option>
+            {sites.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <input
+            value={ip}
+            onChange={e => setIp(e.target.value)}
+            placeholder="IP address (optional)"
+            style={inputStyle}
+          />
+          <input
+            value={manufacturer}
+            onChange={e => setManufacturer(e.target.value)}
+            placeholder="Manufacturer (optional)"
+            style={inputStyle}
+          />
+          <input
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            placeholder="Model (optional)"
+            style={inputStyle}
+          />
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '6px 12px', borderRadius: 8, background: '#1e2535',
+              border: '1px solid #1e2535', color: '#94a3b8', cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={async () => {
+              if (!name.trim()) return
+              setSaving(true)
+              try {
+                await cameraAPI.create({
+                  name: name.trim(),
+                  site_id: siteId || undefined,
+                  ip: ip || undefined,
+                  manufacturer: manufacturer || undefined,
+                  model: model || undefined,
+                } as any)
+                onCreated()
+              } finally {
+                setSaving(false)
+              }
+            }}
+            disabled={saving || !name.trim()}
+            style={{
+              padding: '6px 12px', borderRadius: 8,
+              background: saving || !name.trim() ? '#1a2230' : '#1e3a5f',
+              border: '1px solid #2563eb', color: '#93c5fd',
+              cursor: saving || !name.trim() ? 'not-allowed' : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {saving ? 'Saving...' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
-function EventBadge({ type }: { type: string }) {
-  const colors: Record<string, [string, string]> = {
-    person:   ['#1e3a5f', '#60a5fa'],
-    car:      ['#1c3a2a', '#4ade80'],
-    motion:   ['#2d2a1a', '#fbbf24'],
-    offline:  ['#2a1f1f', '#f87171'],
+const inputStyle: CSSProperties = {
+  padding: '8px 10px',
+  borderRadius: 8,
+  border: '1px solid #1e2535',
+  background: '#0f1117',
+  color: '#e2e8f0',
+  fontSize: 13,
+}
+
+function buildPageNumbers(current: number, total: number) {
+  const max = 7
+  if (total <= max) return Array.from({ length: total }, (_, i) => i)
+  let start = Math.max(0, current - 2)
+  let end = Math.min(total - 1, start + max - 1)
+  if (end - start < max - 1) {
+    start = Math.max(0, end - (max - 1))
   }
-  const [bg, fg] = colors[type] ?? ['#1e2535', '#94a3b8']
-  return (
-    <span style={{
-      padding: '1px 6px', borderRadius: 4, fontSize: 10,
-      fontWeight: 500, background: bg, color: fg,
-      textTransform: 'capitalize',
-    }}>
-      {type}
-    </span>
-  )
+  return Array.from({ length: end - start + 1 }, (_, i) => start + i)
 }
 
 function EmptyState() {
   return (
-    <div style={{
-      textAlign: 'center', padding: '80px 20px',
-      border: '1px dashed #1e2535', borderRadius: 12,
-    }}>
-      <WifiOff size={32} color="#374151" style={{ marginBottom: 12 }} />
-      <div style={{ color: '#94a3b8', fontSize: 15, fontWeight: 500, marginBottom: 8 }}>
-        No cameras found
-      </div>
-      <div style={{ color: '#64748b', fontSize: 13, lineHeight: 1.6 }}>
-        Install the edge agent on a mini-PC connected to your camera network.<br />
-        Cameras will appear here automatically within 60 seconds.
-      </div>
+    <div style={{ textAlign: 'center', padding: '80px 20px', color: '#64748b' }}>
+      <div style={{ fontSize: 14, fontWeight: 500 }}>No cameras found</div>
+      <div style={{ fontSize: 12, marginTop: 6 }}>Add a camera to start monitoring.</div>
     </div>
+  )
+}
+
+function EventBadge({ type }: { type: string }) {
+  const colors: Record<string, string> = {
+    person: '#60a5fa',
+    car: '#4ade80',
+    motion: '#fbbf24',
+    bicycle: '#a78bfa',
+    offline: '#f87171',
+  }
+  return (
+    <span style={{
+      padding: '2px 6px', borderRadius: 4, fontSize: 10,
+      color: colors[type] ?? '#94a3b8', border: `1px solid ${colors[type] ?? '#334155'}`,
+    }}>
+      {type}
+    </span>
   )
 }
