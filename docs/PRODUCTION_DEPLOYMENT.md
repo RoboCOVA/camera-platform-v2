@@ -321,6 +321,17 @@ Minimum operational standard:
 
 A production environment without tested restore capability is not ready.
 
+Reference scripts (included in repo):
+
+- `deploy/backup/backup.sh` — Postgres + config snapshot
+- `deploy/backup/restore.sh` — restore a Postgres dump
+
+Suggested cron (nightly at 02:00 UTC):
+
+```bash
+0 2 * * * /bin/bash /opt/cam-platform/deploy/backup/backup.sh >> /var/log/cam-backup.log 2>&1
+```
+
 ## Monitoring and Alerting
 
 At minimum, alert on:
@@ -338,6 +349,11 @@ Recommended operator views:
 
 - current site/device heartbeat status
 - recent provisioning attempts
+
+Notes:
+
+- Prometheus alert rules live in `deploy/prometheus/alerts.yml`.
+- Alert delivery requires a separate Alertmanager or external service integration.
 - container health and restart counts
 - disk consumption on control plane and edge hosts
 

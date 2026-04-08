@@ -20,6 +20,9 @@ app.{$DOMAIN} {
 
 # ── Control plane API ─────────────────────────────────────────────────────────
 api.{$DOMAIN} {
+  @metrics path /metrics
+  respond @metrics 403
+
   reverse_proxy cam_api:3001
 
   header {

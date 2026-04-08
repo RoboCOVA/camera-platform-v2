@@ -26,6 +26,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/yourorg/cam-platform/internal/auth"
 	"golang.org/x/crypto/curve25519"
@@ -127,10 +130,12 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
 	r.Use(corsMiddleware)
+	r.Use(metricsMiddleware)
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	// Public endpoints
 	r.Get("/health", app.handleHealth)
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 	r.Post("/api/devices/heartbeat", app.handleDeviceHeartbeat)
 	r.Post("/api/devices/cameras", app.handleDeviceCameras)
 	r.Post("/api/provision", app.handleProvision)
@@ -1503,6 +1508,53 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+var (
+	reqCount = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cam_api_requests_total",
+			Help: "Total number of HTTP requests.",
+		},
+		[]string{"method", "path", "status"},
+	)
+	reqDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "cam_api_request_duration_seconds",
+			Help:    "HTTP request duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path", "status"},
+	)
+)
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		sr := &statusRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sr, r)
+		path := r.URL.Path
+		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
+			path = rc.RoutePattern()
+		}
+		status := fmt.Sprintf("%d", sr.status)
+		reqCount.WithLabelValues(r.Method, path, status).Inc()
+		reqDuration.WithLabelValues(r.Method, path, status).Observe(time.Since(start).Seconds())
+	})
+}
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

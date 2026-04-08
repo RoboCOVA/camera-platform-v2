@@ -232,6 +232,11 @@ At minimum, back up:
 - Caddy data/config
 - Keycloak config and identity data
 
+Optional scripts (included):
+
+- `deploy/backup/backup.sh`
+- `deploy/backup/restore.sh`
+
 ### 4. Secret handling
 
 - move secrets into a vault

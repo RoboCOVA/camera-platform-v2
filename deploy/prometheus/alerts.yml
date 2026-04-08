@@ -1,0 +1,31 @@
+groups:
+  - name: cam-platform
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance down"
+          description: "{{ $labels.job }} is down"
+
+      - alert: High5xxRate
+        expr: |
+          sum(rate(cam_api_requests_total{status=~"5.."}[5m])) /
+          sum(rate(cam_api_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API 5xx rate"
+          description: "More than 5% of API requests are failing with 5xx over 5m"
+
+      - alert: PostgresExporterDown
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Postgres exporter down"
+          description: "Postgres exporter is not reachable"
