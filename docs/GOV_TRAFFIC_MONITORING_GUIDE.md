@@ -127,6 +127,37 @@ Frigate is **not designed** to run centrally for thousands of cameras. Centraliz
 - **Clip-on-demand** retrieval for investigations
 - **Adaptive streaming** (low bitrate for central dashboards)
 
+## 11. Edge ANPR (Open Source, Ethiopia Focus)
+
+Edge ANPR is deployed per site. It runs locally alongside Frigate to avoid WAN bandwidth and to keep plate data within jurisdictional boundaries.
+
+Defaults:
+
+- OCR engine: Tesseract
+- Language: `eng` (adjustable for regional plate text)
+- Output topic: `anpr/<camera_name>`
+
+Notes for Ethiopia:
+
+- Plate formats may include regional scripts and symbols; OCR accuracy will vary.
+- Start with English OCR and refine with custom regex patterns and image preprocessing.
+- Use `ANPR_PRESET=et` and tune `ANPR_REGEX` as local data is gathered.
+- Consider collecting a local plate dataset to fine-tune OCR or add a specialized model.
+
+## 12. ANPR Tuning Hooks
+
+The edge ANPR sidecar includes:
+
+- **Custom plate regex presets** via `ANPR_PRESET` (default `et`)
+- **Image preprocessing** (deskew + binarization)
+- **Optional YOLO plate detector** via `ANPR_YOLO_MODEL` (ONNX path)
+
+These are configured in `deploy/install-agent.sh` and can be overridden per site in `/etc/cam/agent.env` and the ANPR container environment.
+
+Training recipe:
+
+- `docs/ANPR_TRAINING_ETHIOPIA.md`
+
 ## 8. Multi-Site Deployment Model
 
 Recommended:
@@ -160,4 +191,3 @@ Before production rollout:
 - Metrics allowlisted
 - Incident runbook ready
 - Pilot site validated end-to-end
-

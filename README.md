@@ -24,6 +24,7 @@ Detailed deployment and commissioning guide:
 - [Commissioning Checklist](./docs/COMMISSIONING_CHECKLIST.md)
 - [Customer Site Game Plan](./docs/CUSTOMER_SITE_GAME_PLAN.md)
 - [Government Traffic Monitoring Guide](./docs/GOV_TRAFFIC_MONITORING_GUIDE.md)
+- [Ethiopia ANPR Training Recipe](./docs/ANPR_TRAINING_ETHIOPIA.md)
 - [Incident Runbook](./docs/RUNBOOK_INCIDENTS.md)
 
 ### 1. Deploy control plane (VPS — run once)

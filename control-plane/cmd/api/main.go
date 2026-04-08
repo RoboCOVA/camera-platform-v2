@@ -120,9 +120,9 @@ func main() {
 
 	app := &App{cfg: cfg, db: db, mqtt: mqttClient, hub: hub, verifier: verifier}
 
-	// Subscribe to all Frigate events from all sites
-	// Topic pattern: frigate/{site_id}/events
+	// Subscribe to Frigate + ANPR events
 	mqttClient.Subscribe("frigate/#", 1, app.handleMQTTEvent)
+	mqttClient.Subscribe("anpr/#", 1, app.handleMQTTEvent)
 
 	// Routes
 	r := chi.NewRouter()
@@ -1065,14 +1065,26 @@ func (a *App) handleMQTTEvent(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// Map Frigate camera name back to our camera ID via DB
-	// Topic: frigate/{frigate_camera_name}/events
+	// Map camera name back to our camera ID via DB
+	// Topics:
+	//   frigate/{frigate_camera_name}/events
+	//   anpr/{frigate_camera_name}
 	parts := strings.Split(topic, "/")
-	if len(parts) < 3 {
+	if len(parts) < 2 {
 		return
 	}
 	frigataName := parts[1]
-	eventType := parts[2]
+	eventType := ""
+	if parts[0] == "frigate" {
+		if len(parts) < 3 {
+			return
+		}
+		eventType = parts[2]
+	} else if parts[0] == "anpr" {
+		eventType = "anpr"
+	} else {
+		return
+	}
 
 	// Store event in DB (best-effort, don't block)
 	go func() {
@@ -1092,6 +1104,14 @@ func (a *App) handleMQTTEvent(client mqtt.Client, msg mqtt.Message) {
 		payloadJSON, _ := json.Marshal(frigateEvent)
 
 		label, score, frigateEventID := extractFrigateDetails(frigateEvent)
+		if eventType == "anpr" {
+			if v, ok := frigateEvent["plate_text"].(string); ok && v != "" {
+				label = v
+			}
+			if v, ok := frigateEvent["confidence"].(float64); ok {
+				score = v
+			}
+		}
 		a.db.ExecContext(ctx, `
 			INSERT INTO events (id, org_id, site_id, camera_id, type, label, score, payload, started_at, frigate_event_id)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)`,

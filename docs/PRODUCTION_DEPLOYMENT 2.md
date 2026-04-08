@@ -349,6 +349,21 @@ Recommended operator views:
 - current site/device heartbeat status
 - recent provisioning attempts
 
+## Edge ANPR (Open Source)
+
+Edge ANPR runs locally as a sidecar on the edge node. It subscribes to Frigate event snapshots, performs OCR, and publishes plate text via MQTT.
+
+Defaults:
+
+- OCR engine: Tesseract
+- Language: `eng` (adjustable)
+- Topic: `anpr/<camera_name>`
+
+Configuration is set in the edge install script (`deploy/install-agent.sh`) and can be tuned per site:
+
+- `ANPR_LANG`
+- `ANPR_REGEX`
+
 Notes:
 
 - Prometheus alert rules live in `deploy/prometheus/alerts.yml`.
