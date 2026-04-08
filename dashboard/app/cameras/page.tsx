@@ -66,7 +66,7 @@ export default function CamerasPage() {
     if (page > totalPages - 1) setPage(0)
   }, [page, totalPages])
 
->>>>>>> fdc694e (added guides doc)
+
   const sites = siteList ?? []
   const total = cameraPage?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -264,9 +264,9 @@ export default function CamerasPage() {
             </button>
 
             {Array.from({ length: totalPages }, (_, i) => i).slice(0, 7).map(p => (
-=======
+
             {pageNumbers.map(p => (
->>>>>>> fdc694e (added guides doc)
+
               <button
                 key={p}
                 onClick={() => setPage(p)}
@@ -285,7 +285,7 @@ export default function CamerasPage() {
             {totalPages > 7 && (
 
             {totalPages > pageNumbers.length && (
->>>>>>> fdc694e (added guides doc)
+
               <span style={{ color: '#64748b', fontSize: 12, padding: '0 6px' }}>…</span>
             )}
             <button
@@ -502,8 +502,7 @@ const inputStyle: CSSProperties = {
 }
 
 // ─── Small components ─────────────────────────────────────────────────────────
-=======
->>>>>>> fdc694e (added guides doc)
+
 
   return (
     <div style={{
