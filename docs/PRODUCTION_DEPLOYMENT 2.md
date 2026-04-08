@@ -32,6 +32,11 @@ Production launch status:
 - `Allowed`: internal testing, staging, pilot, controlled customer rollout with manual operator involvement
 - `Not allowed yet`: unattended large-scale production rollout or broad public launch until live-stream validation is complete
 
+QA references:
+
+- `docs/QA_GATE.md`
+- `docs/GO_NO_GO_CHECKLIST.md`
+
 ## Production Topology
 
 Public endpoints:

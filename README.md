@@ -26,6 +26,8 @@ Detailed deployment and commissioning guide:
 - [Government Traffic Monitoring Guide](./docs/GOV_TRAFFIC_MONITORING_GUIDE.md)
 - [Ethiopia ANPR Training Recipe](./docs/ANPR_TRAINING_ETHIOPIA.md)
 - [Ethiopia Execution Roadmap](./docs/EXECUTION_ROADMAP_ETHIOPIA.md)
+- [QA Gate](./docs/QA_GATE.md)
+- [Go/No-Go Checklist](./docs/GO_NO_GO_CHECKLIST.md)
 - [Incident Runbook](./docs/RUNBOOK_INCIDENTS.md)
 
 ### 1. Deploy control plane (VPS — run once)
