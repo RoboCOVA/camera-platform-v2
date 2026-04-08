@@ -22,6 +22,7 @@ Detailed deployment and commissioning guide:
 - [Operations Guide](./docs/OPERATIONS_GUIDE.md)
 - [Sizing Guide](./docs/SIZING_GUIDE.md)
 - [Commissioning Checklist](./docs/COMMISSIONING_CHECKLIST.md)
+- [Customer Site Game Plan](./docs/CUSTOMER_SITE_GAME_PLAN.md)
 - [Incident Runbook](./docs/RUNBOOK_INCIDENTS.md)
 
 ### 1. Deploy control plane (VPS — run once)
