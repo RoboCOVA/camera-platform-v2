@@ -19,11 +19,12 @@ export function CameraDetailModal({ camera, onClose }: Props) {
   const [playbackTime, setPlaybackTime] = useState<Date>(new Date())
   const overlayRef = useRef<HTMLDivElement>(null)
 
-  const { data: eventList } = useSWR(
+  const { data: eventPage } = useSWR(
     ['events', camera.id],
-    () => eventsAPI.list({ camera_id: camera.id }),
+    () => eventsAPI.list({ camera_id: camera.id, limit: 50, offset: 0 }),
     { refreshInterval: 10_000 }
   )
+  const eventList = eventPage?.items ?? []
 
   // Close on Escape
   useEffect(() => {

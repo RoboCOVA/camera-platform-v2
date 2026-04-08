@@ -3,7 +3,8 @@
 // Run with: go test ./internal/api/... -v -tags integration
 //
 // Prerequisites:
-//   TEST_DATABASE_URL=postgres://cam:cam@localhost:5432/camplatform_test?sslmode=disable
+//
+//	TEST_DATABASE_URL=postgres://cam:cam@localhost:5432/camplatform_test?sslmode=disable
 package api_test
 
 import (
@@ -116,11 +117,14 @@ func TestCameraList_Empty(t *testing.T) {
 	resp := ts.get(t, "/api/cameras", ts.authHeader(t, orgID))
 	testutil.AssertStatus(t, resp, 200)
 
-	var cameras []map[string]interface{}
-	testutil.MustJSON(t, resp, &cameras)
+	var body struct {
+		Items []map[string]interface{} `json:"items"`
+		Total int                      `json:"total"`
+	}
+	testutil.MustJSON(t, resp, &body)
 
-	if len(cameras) != 0 {
-		t.Errorf("expected empty camera list, got %d", len(cameras))
+	if len(body.Items) != 0 {
+		t.Errorf("expected empty camera list, got %d", len(body.Items))
 	}
 }
 
@@ -143,19 +147,23 @@ func TestCameraList_ReturnsCamerasForOrg(t *testing.T) {
 	resp := ts.get(t, "/api/cameras", ts.authHeader(t, orgA))
 	testutil.AssertStatus(t, resp, 200)
 
-	var cameras []map[string]interface{}
-	testutil.MustJSON(t, resp, &cameras)
+	var body struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	testutil.MustJSON(t, resp, &body)
 
-	if len(cameras) != 3 {
-		t.Errorf("org A: expected 3 cameras, got %d", len(cameras))
+	if len(body.Items) != 3 {
+		t.Errorf("org A: expected 3 cameras, got %d", len(body.Items))
 	}
 
 	// Org B should see exactly 1
 	resp2 := ts.get(t, "/api/cameras", ts.authHeader(t, orgB))
-	var cameras2 []map[string]interface{}
-	testutil.MustJSON(t, resp2, &cameras2)
-	if len(cameras2) != 1 {
-		t.Errorf("org B: expected 1 camera, got %d", len(cameras2))
+	var body2 struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	testutil.MustJSON(t, resp2, &body2)
+	if len(body2.Items) != 1 {
+		t.Errorf("org B: expected 1 camera, got %d", len(body2.Items))
 	}
 }
 
@@ -174,11 +182,13 @@ func TestCameraList_FilterBySite(t *testing.T) {
 	resp := ts.get(t, "/api/cameras?site_id="+site1, ts.authHeader(t, orgID))
 	testutil.AssertStatus(t, resp, 200)
 
-	var cameras []map[string]interface{}
-	testutil.MustJSON(t, resp, &cameras)
+	var body struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	testutil.MustJSON(t, resp, &body)
 
-	if len(cameras) != 2 {
-		t.Errorf("expected 2 cameras for site1, got %d", len(cameras))
+	if len(body.Items) != 2 {
+		t.Errorf("expected 2 cameras for site1, got %d", len(body.Items))
 	}
 }
 
@@ -388,10 +398,12 @@ func TestEventList_Empty(t *testing.T) {
 	resp := ts.get(t, "/api/events", ts.authHeader(t, orgID))
 	testutil.AssertStatus(t, resp, 200)
 
-	var events []interface{}
-	testutil.MustJSON(t, resp, &events)
-	if len(events) != 0 {
-		t.Errorf("expected empty events, got %d", len(events))
+	var body struct {
+		Items []interface{} `json:"items"`
+	}
+	testutil.MustJSON(t, resp, &body)
+	if len(body.Items) != 0 {
+		t.Errorf("expected empty events, got %d", len(body.Items))
 	}
 }
 
@@ -473,12 +485,20 @@ func makeCameraListHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := auth.MustClaimsFromContext(r.Context())
 		siteFilter := r.URL.Query().Get("site_id")
-		query := `SELECT id,name,manufacturer,model,ip,width,height,status FROM cameras WHERE org_id=$1`
+		where := `WHERE org_id=$1`
 		args := []interface{}{claims.OrgID}
 		if siteFilter != "" {
-			query += " AND site_id=$2"
+			where += " AND site_id=$2"
 			args = append(args, siteFilter)
 		}
+
+		var total int
+		if err := db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM cameras "+where, args...).Scan(&total); err != nil {
+			http.Error(w, `{"error":"internal"}`, 500)
+			return
+		}
+
+		query := `SELECT id,name,manufacturer,model,ip,width,height,status FROM cameras ` + where + " ORDER BY name LIMIT 100 OFFSET 0"
 		rows, err := db.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			http.Error(w, `{"error":"internal"}`, 500)
@@ -504,7 +524,12 @@ func makeCameraListHandler(db *sql.DB) http.HandlerFunc {
 		if cameras == nil {
 			cameras = []cam{}
 		}
-		writeJSON(w, 200, cameras)
+		writeJSON(w, 200, map[string]interface{}{
+			"items":  cameras,
+			"total":  total,
+			"limit":  100,
+			"offset": 0,
+		})
 	}
 }
 
@@ -574,8 +599,13 @@ func makeSiteCreateHandler(db *sql.DB) http.HandlerFunc {
 func makeEventListHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims := auth.MustClaimsFromContext(r.Context())
+		var total int
+		if err := db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM events WHERE org_id=$1`, claims.OrgID).Scan(&total); err != nil {
+			http.Error(w, `{"error":"internal"}`, 500)
+			return
+		}
 		rows, _ := db.QueryContext(r.Context(),
-			`SELECT id,type FROM events WHERE org_id=$1 ORDER BY started_at DESC LIMIT 100`,
+			`SELECT id,type FROM events WHERE org_id=$1 ORDER BY started_at DESC LIMIT 100 OFFSET 0`,
 			claims.OrgID)
 		defer rows.Close()
 		type evt struct {
@@ -591,7 +621,12 @@ func makeEventListHandler(db *sql.DB) http.HandlerFunc {
 		if events == nil {
 			events = []evt{}
 		}
-		writeJSON(w, 200, events)
+		writeJSON(w, 200, map[string]interface{}{
+			"items":  events,
+			"total":  total,
+			"limit":  100,
+			"offset": 0,
+		})
 	}
 }
 

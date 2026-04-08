@@ -10,20 +10,23 @@ import { format, subHours, startOfHour } from 'date-fns'
 interface Props {
   camera: Camera
   onClose: () => void
+  canAdmin?: boolean
+  onDeleted?: () => void
 }
 
 type ViewMode = 'live' | 'playback'
 
-export function CameraDetailModal({ camera, onClose }: Props) {
+export function CameraDetailModal({ camera, onClose, canAdmin, onDeleted }: Props) {
   const [mode, setMode] = useState<ViewMode>('live')
   const [playbackTime, setPlaybackTime] = useState<Date>(new Date())
   const overlayRef = useRef<HTMLDivElement>(null)
 
-  const { data: eventList } = useSWR(
+  const { data: eventPage } = useSWR(
     ['events', camera.id],
-    () => eventsAPI.list({ camera_id: camera.id }),
+    () => eventsAPI.list({ camera_id: camera.id, limit: 50, offset: 0 }),
     { refreshInterval: 10_000 }
   )
+  const eventList = eventPage?.items ?? []
 
   // Close on Escape
   useEffect(() => {
@@ -77,6 +80,22 @@ export function CameraDetailModal({ camera, onClose }: Props) {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {canAdmin && (
+              <button
+                onClick={async () => {
+                  if (!confirm('Delete this camera? This cannot be undone.')) return
+                  await cameraAPI.delete(camera.id)
+                  onDeleted?.()
+                }}
+                style={{
+                  padding: '6px 10px', borderRadius: 8, background: '#3b1b1b',
+                  border: '1px solid #7f1d1d', color: '#fecaca', cursor: 'pointer',
+                  fontSize: 12,
+                }}
+              >
+                Delete
+              </button>
+            )}
             {/* Mode toggle */}
             <div style={{ display: 'flex', borderRadius: 8, border: '1px solid #1e2535', overflow: 'hidden' }}>
               {(['live', 'playback'] as const).map(m => (

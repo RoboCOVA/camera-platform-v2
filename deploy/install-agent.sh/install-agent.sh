@@ -91,6 +91,7 @@ CAM_CONTROL_KEY=$DEVICE_KEY
 CAM_DATA_PATH=/data
 CAM_FRIGATE_CONFIG=/etc/frigate/frigate.yml
 CAM_MQTT_HOST=localhost
+CAM_FRIGATE_MODE=docker
 # Optional: specify subnet to scan instead of multicast
 # CAM_SUBNET=192.168.1.0/24
 # Camera credentials to try (add more as needed)

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,7 +12,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,10 +23,12 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
+
+	"github.com/yourorg/cam-platform/internal/auth"
+	"golang.org/x/crypto/curve25519"
 )
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -30,35 +36,45 @@ import (
 type Config struct {
 	DatabaseURL    string
 	KeycloakURL    string
+	KeycloakIssuer string
 	KeycloakRealm  string
 	MQTTBroker     string
 	MQTTUser       string
 	MQTTPassword   string
 	DeviceSecret   string
 	Port           string
+	Domain         string
+	WGServerPubKey string
+	WGContainer    string
+	WGInterface    string
 }
 
 func configFromEnv() Config {
 	return Config{
-		DatabaseURL:   mustEnv("DATABASE_URL"),
-		KeycloakURL:   mustEnv("KEYCLOAK_URL"),
-		KeycloakRealm: getEnvOr("KEYCLOAK_REALM", "camplatform"),
-		MQTTBroker:    getEnvOr("MQTT_BROKER", "mqtt://localhost:1883"),
-		MQTTUser:      os.Getenv("MQTT_USER"),
-		MQTTPassword:  os.Getenv("MQTT_PASSWORD"),
-		DeviceSecret:  mustEnv("DEVICE_SECRET"),
-		Port:          getEnvOr("PORT", "3001"),
+		DatabaseURL:    mustEnv("DATABASE_URL"),
+		KeycloakURL:    mustEnv("KEYCLOAK_URL"),
+		KeycloakIssuer: getEnvOr("KEYCLOAK_ISSUER", ""),
+		KeycloakRealm:  getEnvOr("KEYCLOAK_REALM", "camplatform"),
+		MQTTBroker:     getEnvOr("MQTT_BROKER", "mqtt://localhost:1883"),
+		MQTTUser:       os.Getenv("MQTT_USER"),
+		MQTTPassword:   os.Getenv("MQTT_PASSWORD"),
+		DeviceSecret:   mustEnv("DEVICE_SECRET"),
+		Port:           getEnvOr("PORT", "3001"),
+		Domain:         mustEnv("DOMAIN"),
+		WGServerPubKey: mustEnv("WG_SERVER_PUBLIC_KEY"),
+		WGContainer:    getEnvOr("WG_DOCKER_CONTAINER", "cam_wireguard"),
+		WGInterface:    getEnvOr("WG_INTERFACE", "wg0"),
 	}
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 type App struct {
-	cfg    Config
-	db     *sql.DB
-	mqtt   mqtt.Client
-	hub    *WSHub
-	jwks   *JWKSCache
+	cfg      Config
+	db       *sql.DB
+	mqtt     mqtt.Client
+	hub      *WSHub
+	verifier *auth.Verifier
 }
 
 func main() {
@@ -86,12 +102,20 @@ func main() {
 	hub := NewWSHub()
 	go hub.Run()
 
-	// JWKS cache for Keycloak JWT validation
+	// JWT verifier (Keycloak JWKS)
 	jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs",
-		cfg.KeycloakURL, cfg.KeycloakRealm)
-	jwks := NewJWKSCache(jwksURL, 1*time.Hour)
+		strings.TrimRight(cfg.KeycloakURL, "/"), cfg.KeycloakRealm)
+	issuer := cfg.KeycloakIssuer
+	if issuer == "" {
+		issuer = fmt.Sprintf("%s/realms/%s", strings.TrimRight(cfg.KeycloakURL, "/"), cfg.KeycloakRealm)
+	}
+	verifier := auth.NewVerifierWithOptions(auth.Options{
+		JWKSURL:  jwksURL,
+		Issuer:   issuer,
+		Audience: "cam-api",
+	})
 
-	app := &App{cfg: cfg, db: db, mqtt: mqttClient, hub: hub, jwks: jwks}
+	app := &App{cfg: cfg, db: db, mqtt: mqttClient, hub: hub, verifier: verifier}
 
 	// Subscribe to all Frigate events from all sites
 	// Topic pattern: frigate/{site_id}/events
@@ -109,23 +133,26 @@ func main() {
 	r.Get("/health", app.handleHealth)
 	r.Post("/api/devices/heartbeat", app.handleDeviceHeartbeat)
 	r.Post("/api/devices/cameras", app.handleDeviceCameras)
+	r.Post("/api/provision", app.handleProvision)
 
 	// Authenticated endpoints (JWT required)
 	r.Group(func(r chi.Router) {
-		r.Use(app.jwtMiddleware)
+		r.Use(auth.Middleware(app.verifier))
 
 		// Orgs
 		r.Get("/api/orgs/me", app.handleGetMyOrg)
 
 		// Sites
 		r.Get("/api/sites", app.handleListSites)
-		r.Post("/api/sites", app.handleCreateSite)
+		r.With(auth.RequireAdmin).Post("/api/sites", app.handleCreateSite)
 		r.Get("/api/sites/{siteID}", app.handleGetSite)
 
 		// Cameras
 		r.Get("/api/cameras", app.handleListCameras)
+		r.With(auth.RequireAdmin).Post("/api/cameras", app.handleCreateCamera)
 		r.Get("/api/cameras/{cameraID}", app.handleGetCamera)
-		r.Patch("/api/cameras/{cameraID}", app.handleUpdateCamera)
+		r.With(auth.RequireAdmin).Delete("/api/cameras/{cameraID}", app.handleDeleteCamera)
+		r.With(auth.RequireAdmin).Patch("/api/cameras/{cameraID}", app.handleUpdateCamera)
 
 		// Events
 		r.Get("/api/events", app.handleListEvents)
@@ -139,11 +166,11 @@ func main() {
 
 		// Alert rules
 		r.Get("/api/alert-rules", app.handleListAlertRules)
-		r.Post("/api/alert-rules", app.handleCreateAlertRule)
-		r.Delete("/api/alert-rules/{ruleID}", app.handleDeleteAlertRule)
+		r.With(auth.RequireAdmin).Post("/api/alert-rules", app.handleCreateAlertRule)
+		r.With(auth.RequireAdmin).Delete("/api/alert-rules/{ruleID}", app.handleDeleteAlertRule)
 
 		// Device provisioning tokens
-		r.Post("/api/provision-tokens", app.handleCreateProvisionToken)
+		r.With(auth.RequireAdmin).Post("/api/provision-tokens", app.handleCreateProvisionToken)
 
 		// WebSocket for real-time events
 		r.Get("/ws/events", app.handleWebSocket)
@@ -195,8 +222,8 @@ func (a *App) handleDeviceHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		DeviceID  string `json:"device_id"`
-		Cameras   []struct {
+		DeviceID string `json:"device_id"`
+		Cameras  []struct {
 			ID     string `json:"id"`
 			Online bool   `json:"online"`
 		} `json:"cameras"`
@@ -264,22 +291,30 @@ func (a *App) handleDeviceCameras(w http.ResponseWriter, r *http.Request) {
 
 	// Upsert each camera
 	for _, cam := range payload.Cameras {
+		frigateName := sanitizeFrigateName(cam.Name, cam.ID)
 		_, err := a.db.ExecContext(r.Context(), `
 			INSERT INTO cameras
 				(id, org_id, site_id, device_id, name, manufacturer, model, serial,
-				 ip, main_stream_url, sub_stream_url, width, height, status, last_seen)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,$13,'online',NOW())
+				 ip, main_stream_url, sub_stream_url, width, height, status, last_seen, frigate_name)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,$13,'online',NOW(),$14)
 			ON CONFLICT (id) DO UPDATE SET
 				name = EXCLUDED.name,
+				manufacturer = EXCLUDED.manufacturer,
+				model = EXCLUDED.model,
+				serial = EXCLUDED.serial,
 				device_id = EXCLUDED.device_id,
 				main_stream_url = EXCLUDED.main_stream_url,
 				sub_stream_url = EXCLUDED.sub_stream_url,
+				ip = EXCLUDED.ip,
+				width = EXCLUDED.width,
+				height = EXCLUDED.height,
+				frigate_name = EXCLUDED.frigate_name,
 				status = 'online',
 				last_seen = NOW()`,
 			cam.ID, orgID, siteID, deviceID,
 			cam.Name, cam.Manufacturer, cam.Model, cam.Serial,
 			cam.IP, cam.MainStreamURL, cam.SubStreamURL,
-			cam.Width, cam.Height)
+			cam.Width, cam.Height, frigateName)
 		if err != nil {
 			log.Printf("[cameras] upsert %s: %v", cam.ID, err)
 		}
@@ -294,16 +329,28 @@ func (a *App) handleListCameras(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 
 	siteFilter := r.URL.Query().Get("site_id")
+	limit, offset := parseLimitOffset(r, 100, 500)
 
-	query := `SELECT id, name, manufacturer, model, ip, width, height, status, last_seen, site_id
-			  FROM cameras WHERE org_id = $1`
+	where := `WHERE org_id = $1`
 	args := []interface{}{claims.OrgID}
+	i := 2
 
 	if siteFilter != "" {
-		query += " AND site_id = $2"
+		where += fmt.Sprintf(" AND site_id = $%d", i)
 		args = append(args, siteFilter)
+		i++
 	}
-	query += " ORDER BY name"
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM cameras " + where
+	if err := a.db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	query := `SELECT id, name, manufacturer, model, ip, width, height, status, last_seen, site_id
+			  FROM cameras ` + where + fmt.Sprintf(" ORDER BY name LIMIT $%d OFFSET $%d", i, i+1)
+	args = append(args, limit, offset)
 
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -343,7 +390,12 @@ func (a *App) handleListCameras(w http.ResponseWriter, r *http.Request) {
 		cameras = append(cameras, c)
 	}
 
-	writeJSON(w, 200, cameras)
+	writeJSON(w, 200, map[string]interface{}{
+		"items":  cameras,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 func (a *App) handleGetCamera(w http.ResponseWriter, r *http.Request) {
@@ -351,17 +403,17 @@ func (a *App) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 	cameraID := chi.URLParam(r, "cameraID")
 
 	var cam struct {
-		ID            string  `json:"id"`
-		Name          string  `json:"name"`
-		Manufacturer  string  `json:"manufacturer"`
-		Model         string  `json:"model"`
-		Serial        string  `json:"serial"`
-		IP            string  `json:"ip"`
-		Width         int     `json:"width"`
-		Height        int     `json:"height"`
-		Status        string  `json:"status"`
-		PTZSupported  bool    `json:"ptz_supported"`
-		FrigataName   string  `json:"frigate_name"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Manufacturer string `json:"manufacturer"`
+		Model        string `json:"model"`
+		Serial       string `json:"serial"`
+		IP           string `json:"ip"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
+		Status       string `json:"status"`
+		PTZSupported bool   `json:"ptz_supported"`
+		FrigataName  string `json:"frigate_name"`
 	}
 	err := a.db.QueryRowContext(r.Context(), `
 		SELECT id, name, manufacturer, model, serial, ip, width, height,
@@ -375,6 +427,96 @@ func (a *App) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, cam)
+}
+
+func (a *App) handleCreateCamera(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	var body struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Manufacturer  string `json:"manufacturer"`
+		Model         string `json:"model"`
+		Serial        string `json:"serial"`
+		IP            string `json:"ip"`
+		MainStreamURL string `json:"main_stream_url"`
+		SubStreamURL  string `json:"sub_stream_url"`
+		Width         int    `json:"width"`
+		Height        int    `json:"height"`
+		PTZSupported  bool   `json:"ptz_supported"`
+		SiteID        string `json:"site_id"`
+		DeviceID      string `json:"device_id"`
+		FrigateName   string `json:"frigate_name"`
+		Status        string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+
+	id := body.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	if body.FrigateName == "" {
+		body.FrigateName = sanitizeFrigateName(body.Name, id)
+	}
+	if body.Status == "" {
+		body.Status = "offline"
+	}
+
+	// Validate site/device belong to org if provided
+	if body.SiteID != "" {
+		var tmp string
+		if err := a.db.QueryRowContext(r.Context(),
+			`SELECT id FROM sites WHERE id=$1 AND org_id=$2`, body.SiteID, claims.OrgID).
+			Scan(&tmp); err == sql.ErrNoRows {
+			http.Error(w, "invalid site_id", 400)
+			return
+		} else if err != nil {
+			http.Error(w, "internal error", 500)
+			return
+		}
+	}
+	if body.DeviceID != "" {
+		var tmp string
+		if err := a.db.QueryRowContext(r.Context(),
+			`SELECT id FROM devices WHERE id=$1 AND org_id=$2`, body.DeviceID, claims.OrgID).
+			Scan(&tmp); err == sql.ErrNoRows {
+			http.Error(w, "invalid device_id", 400)
+			return
+		} else if err != nil {
+			http.Error(w, "internal error", 500)
+			return
+		}
+	}
+
+	var siteID *string
+	if body.SiteID != "" {
+		siteID = &body.SiteID
+	}
+	var deviceID *string
+	if body.DeviceID != "" {
+		deviceID = &body.DeviceID
+	}
+	var ip *string
+	if body.IP != "" {
+		ip = &body.IP
+	}
+
+	_, err := a.db.ExecContext(r.Context(), `
+		INSERT INTO cameras
+			(id, org_id, site_id, device_id, name, manufacturer, model, serial,
+			 ip, main_stream_url, sub_stream_url, width, height, ptz_supported, status, frigate_name)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::inet,$10,$11,$12,$13,$14,$15,$16)`,
+		id, claims.OrgID, siteID, deviceID, body.Name, body.Manufacturer, body.Model,
+		body.Serial, ip, body.MainStreamURL, body.SubStreamURL, body.Width, body.Height,
+		body.PTZSupported, body.Status, body.FrigateName)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "camera.create", "camera", id, map[string]interface{}{"name": body.Name})
+	writeJSON(w, 201, map[string]string{"id": id})
 }
 
 func (a *App) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
@@ -402,6 +544,24 @@ func (a *App) handleUpdateCamera(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func (a *App) handleDeleteCamera(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	cameraID := chi.URLParam(r, "cameraID")
+	res, err := a.db.ExecContext(r.Context(),
+		`DELETE FROM cameras WHERE id=$1 AND org_id=$2`, cameraID, claims.OrgID)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		http.Error(w, "not found", 404)
+		return
+	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "camera.delete", "camera", cameraID, nil)
+	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
 // ─── HLS stream proxy ─────────────────────────────────────────────────────────
@@ -483,24 +643,33 @@ func (a *App) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cameraFilter := q.Get("camera_id")
 	typeFilter := q.Get("type")
-	limit := 100
+	limit, offset := parseLimitOffset(r, 100, 500)
 
-	query := `SELECT id, camera_id, type, label, score, snapshot_url, started_at
-			  FROM events WHERE org_id=$1`
+	where := `WHERE org_id=$1`
 	args := []interface{}{claims.OrgID}
 	i := 2
 
 	if cameraFilter != "" {
-		query += fmt.Sprintf(" AND camera_id=$%d", i)
+		where += fmt.Sprintf(" AND camera_id=$%d", i)
 		args = append(args, cameraFilter)
 		i++
 	}
 	if typeFilter != "" {
-		query += fmt.Sprintf(" AND type=$%d", i)
+		where += fmt.Sprintf(" AND type=$%d", i)
 		args = append(args, typeFilter)
 		i++
 	}
-	query += fmt.Sprintf(" ORDER BY started_at DESC LIMIT %d", limit)
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM events " + where
+	if err := a.db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	query := `SELECT id, camera_id, type, label, score, snapshot_url, started_at
+			  FROM events ` + where + fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", i, i+1)
+	args = append(args, limit, offset)
 
 	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -531,28 +700,140 @@ func (a *App) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		events = append(events, e)
 	}
 
-	writeJSON(w, 200, events)
+	writeJSON(w, 200, map[string]interface{}{
+		"items":  events,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 func (a *App) handleGetEvent(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]string{"todo": "implement"})
+	claims := claimsFromCtx(r.Context())
+	eventID := chi.URLParam(r, "eventID")
+
+	var e struct {
+		ID          string     `json:"id"`
+		CameraID    string     `json:"camera_id"`
+		Type        string     `json:"type"`
+		Label       string     `json:"label"`
+		Score       float64    `json:"score"`
+		SnapshotURL string     `json:"snapshot_url"`
+		ClipURL     string     `json:"clip_url"`
+		StartedAt   time.Time  `json:"started_at"`
+		EndedAt     *time.Time `json:"ended_at"`
+	}
+	var label, snapshot, clip sql.NullString
+	var score sql.NullFloat64
+	var ended sql.NullTime
+	err := a.db.QueryRowContext(r.Context(), `
+		SELECT id, camera_id, type, label, score, snapshot_url, clip_url, started_at, ended_at
+		FROM events WHERE id=$1 AND org_id=$2`,
+		eventID, claims.OrgID).
+		Scan(&e.ID, &e.CameraID, &e.Type, &label, &score, &snapshot, &clip, &e.StartedAt, &ended)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	e.Label = label.String
+	e.Score = score.Float64
+	e.SnapshotURL = snapshot.String
+	e.ClipURL = clip.String
+	if ended.Valid {
+		e.EndedAt = &ended.Time
+	}
+	writeJSON(w, 200, e)
 }
 
 // ─── Alert rules ─────────────────────────────────────────────────────────────
 
 func (a *App) handleListAlertRules(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
-	rows, _ := a.db.QueryContext(r.Context(),
-		`SELECT id, name, event_types, enabled FROM alert_rules WHERE org_id=$1`, claims.OrgID)
+	rows, err := a.db.QueryContext(r.Context(),
+		`SELECT id, name, event_types, enabled FROM alert_rules WHERE org_id=$1 ORDER BY name`, claims.OrgID)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
 	defer rows.Close()
-	writeJSON(w, 200, []interface{}{})
+
+	type rule struct {
+		ID         string   `json:"id"`
+		Name       string   `json:"name"`
+		EventTypes []string `json:"event_types"`
+		Enabled    bool     `json:"enabled"`
+	}
+	var rules []rule
+	for rows.Next() {
+		var r rule
+		var types pq.StringArray
+		if err := rows.Scan(&r.ID, &r.Name, &types, &r.Enabled); err != nil {
+			continue
+		}
+		r.EventTypes = []string(types)
+		rules = append(rules, r)
+	}
+	writeJSON(w, 200, rules)
 }
 
 func (a *App) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 201, map[string]string{"status": "created"})
+	claims := claimsFromCtx(r.Context())
+	var body struct {
+		Name       string   `json:"name"`
+		EventTypes []string `json:"event_types"`
+		MinScore   *float64 `json:"min_score"`
+		Enabled    *bool    `json:"enabled"`
+		SiteID     *string  `json:"site_id"`
+		CameraID   *string  `json:"camera_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if len(body.EventTypes) == 0 {
+		body.EventTypes = []string{"person"}
+	}
+	minScore := 0.7
+	if body.MinScore != nil {
+		minScore = *body.MinScore
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+
+	id := uuid.New().String()
+	_, err := a.db.ExecContext(r.Context(), `
+		INSERT INTO alert_rules (id, org_id, site_id, camera_id, name, event_types, min_score, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		id, claims.OrgID, body.SiteID, body.CameraID, body.Name, pq.Array(body.EventTypes), minScore, enabled)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "alert_rule.create", "alert_rule", id, map[string]interface{}{"name": body.Name})
+	writeJSON(w, 201, map[string]string{"id": id})
 }
 
 func (a *App) handleDeleteAlertRule(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	ruleID := chi.URLParam(r, "ruleID")
+	res, err := a.db.ExecContext(r.Context(),
+		`DELETE FROM alert_rules WHERE id=$1 AND org_id=$2`, ruleID, claims.OrgID)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		http.Error(w, "not found", 404)
+		return
+	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "alert_rule.delete", "alert_rule", ruleID, nil)
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
@@ -608,11 +889,34 @@ func (a *App) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", 500)
 		return
 	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "site.create", "site", id, map[string]interface{}{"name": body.Name})
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
 func (a *App) handleGetSite(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]string{"todo": "implement"})
+	claims := claimsFromCtx(r.Context())
+	siteID := chi.URLParam(r, "siteID")
+	var s struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Address  string `json:"address"`
+		Timezone string `json:"timezone"`
+	}
+	var addr sql.NullString
+	err := a.db.QueryRowContext(r.Context(),
+		`SELECT id, name, address, timezone FROM sites WHERE id=$1 AND org_id=$2`,
+		siteID, claims.OrgID).
+		Scan(&s.ID, &s.Name, &addr, &s.Timezone)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", 404)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	s.Address = addr.String
+	writeJSON(w, 200, s)
 }
 
 func (a *App) handleGetMyOrg(w http.ResponseWriter, r *http.Request) {
@@ -634,12 +938,112 @@ func (a *App) handleCreateProvisionToken(w http.ResponseWriter, r *http.Request)
 	token := fmt.Sprintf("prov_%s", uuid.New().String())
 	_, err := a.db.ExecContext(r.Context(),
 		`INSERT INTO provision_tokens (token, org_id, created_by) VALUES ($1,$2,$3)`,
-		token, claims.OrgID, claims.UserID)
+		token, claims.OrgID, claims.Subject)
 	if err != nil {
 		http.Error(w, "internal error", 500)
 		return
 	}
+	_ = auditLog(a.db, claims.OrgID, claims.Subject, "provision_token.create", "provision_token", token, nil)
 	writeJSON(w, 201, map[string]string{"token": token})
+}
+
+// ─── Provisioning ────────────────────────────────────────────────────────────
+
+func (a *App) handleProvision(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token    string `json:"token"`
+		DeviceID string `json:"device_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" || body.DeviceID == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	defer tx.Rollback()
+
+	var orgID string
+	var siteID sql.NullString
+	var usedAt sql.NullTime
+	var expiresAt time.Time
+	err = tx.QueryRowContext(r.Context(),
+		`SELECT org_id, site_id, used_at, expires_at FROM provision_tokens WHERE token=$1 FOR UPDATE`,
+		body.Token).Scan(&orgID, &siteID, &usedAt, &expiresAt)
+	if err == sql.ErrNoRows {
+		http.Error(w, "invalid token", 403)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+	if usedAt.Valid {
+		http.Error(w, "token already used", 403)
+		return
+	}
+	if time.Now().After(expiresAt) {
+		http.Error(w, "token expired", 403)
+		return
+	}
+
+	wgPriv, wgPub, err := generateWireGuardKeypair()
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	wgIP, err := allocateWGIP(r.Context(), tx)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	deviceKey := "devkey_" + uuid.New().String()
+	var deviceDBID string
+	err = tx.QueryRowContext(r.Context(), `
+		INSERT INTO devices (org_id, site_id, name, device_key, status, wg_ip, wg_public_key, frigate_url)
+		VALUES ($1,$2,$3,$4,'pending',$5,$6,$7)
+		RETURNING id`,
+		orgID, siteID, "Edge NVR "+body.DeviceID, deviceKey, wgIP, wgPub, fmt.Sprintf("http://%s:5000", wgIP)).
+		Scan(&deviceDBID)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	if err := addWireGuardPeer(a.cfg, wgPub, wgIP); err != nil {
+		http.Error(w, "wireguard error", 500)
+		return
+	}
+
+	_, err = tx.ExecContext(r.Context(),
+		`UPDATE provision_tokens SET used_at=NOW(), device_id=$1 WHERE token=$2`,
+		deviceDBID, body.Token)
+	if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	_ = auditLogTx(tx, orgID, body.DeviceID, "device.provision", "device", deviceDBID, map[string]interface{}{
+		"wg_ip": wgIP,
+	})
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	writeJSON(w, 200, map[string]string{
+		"device_key":      deviceKey,
+		"wg_private_key":  wgPriv,
+		"wg_ip":           wgIP,
+		"server_pubkey":   a.cfg.WGServerPubKey,
+		"server_endpoint": fmt.Sprintf("%s:51820", a.cfg.Domain),
+	})
 }
 
 // ─── MQTT → WebSocket bridge ──────────────────────────────────────────────────
@@ -671,9 +1075,10 @@ func (a *App) handleMQTTEvent(client mqtt.Client, msg mqtt.Message) {
 		defer cancel()
 
 		var cameraID, orgID string
+		var siteID sql.NullString
 		err := a.db.QueryRowContext(ctx,
-			`SELECT id, org_id FROM cameras WHERE frigate_name=$1`, frigataName).
-			Scan(&cameraID, &orgID)
+			`SELECT id, org_id, site_id FROM cameras WHERE frigate_name=$1`, frigataName).
+			Scan(&cameraID, &orgID, &siteID)
 		if err != nil {
 			return
 		}
@@ -681,22 +1086,169 @@ func (a *App) handleMQTTEvent(client mqtt.Client, msg mqtt.Message) {
 		eventID := uuid.New().String()
 		payloadJSON, _ := json.Marshal(frigateEvent)
 
+		label, score, frigateEventID := extractFrigateDetails(frigateEvent)
 		a.db.ExecContext(ctx, `
-			INSERT INTO events (id, org_id, camera_id, type, payload, started_at)
-			VALUES ($1,$2,$3,$4,$5,NOW())`,
-			eventID, orgID, cameraID, eventType, payloadJSON)
+			INSERT INTO events (id, org_id, site_id, camera_id, type, label, score, payload, started_at, frigate_event_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)`,
+			eventID, orgID, siteID, cameraID, eventType, label, score, payloadJSON, frigateEventID)
 
 		// Push to WebSocket clients subscribed to this org
 		wsMsg, _ := json.Marshal(map[string]interface{}{
-			"type":      "event",
-			"event_id":  eventID,
-			"camera_id": cameraID,
+			"type":       "event",
+			"event_id":   eventID,
+			"camera_id":  cameraID,
 			"event_type": eventType,
-			"payload":   frigateEvent,
-			"timestamp": time.Now().UTC(),
+			"payload":    frigateEvent,
+			"timestamp":  time.Now().UTC(),
 		})
 		a.hub.BroadcastToOrg(orgID, wsMsg)
+
+		// Evaluate alert rules (best-effort)
+		a.evaluateAlertRules(ctx, orgID, siteID.String, cameraID, eventType, score, eventID)
 	}()
+}
+
+func extractFrigateDetails(evt map[string]interface{}) (label string, score float64, eventID string) {
+	after, ok := evt["after"].(map[string]interface{})
+	if !ok {
+		return "", 0, ""
+	}
+	if v, ok := after["label"].(string); ok {
+		label = v
+	}
+	switch v := after["score"].(type) {
+	case float64:
+		score = v
+	case int:
+		score = float64(v)
+	}
+	if v, ok := after["id"].(string); ok {
+		eventID = v
+	}
+	return
+}
+
+func (a *App) evaluateAlertRules(ctx context.Context, orgID, siteID, cameraID, eventType string, score float64, eventID string) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT id, event_types, min_score, active_from, active_to, active_days, cooldown_secs, last_triggered
+		FROM alert_rules
+		WHERE org_id=$1 AND enabled=true
+		  AND (camera_id IS NULL OR camera_id=$2)
+		  AND (site_id IS NULL OR site_id=$3)`,
+		orgID, cameraID, siteID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	now := time.Now().UTC()
+	for rows.Next() {
+		var (
+			ruleID        string
+			eventTypes    pq.StringArray
+			minScore      float64
+			activeFrom    sql.NullString
+			activeTo      sql.NullString
+			activeDays    pq.Int64Array
+			cooldownSecs  int
+			lastTriggered sql.NullTime
+		)
+		if err := rows.Scan(&ruleID, &eventTypes, &minScore, &activeFrom, &activeTo, &activeDays, &cooldownSecs, &lastTriggered); err != nil {
+			continue
+		}
+		if !eventTypeAllowed(eventType, []string(eventTypes)) {
+			continue
+		}
+		if score > 0 && score < minScore {
+			continue
+		}
+		if !withinSchedule(now, activeFrom, activeTo, activeDays) {
+			continue
+		}
+		if lastTriggered.Valid && now.Sub(lastTriggered.Time) < time.Duration(cooldownSecs)*time.Second {
+			continue
+		}
+
+		_, _ = a.db.ExecContext(ctx,
+			`UPDATE alert_rules SET last_triggered=$1 WHERE id=$2`, now, ruleID)
+		_ = auditLog(a.db, orgID, "system", "alert_rule.trigger", "alert_rule", ruleID, map[string]interface{}{
+			"event_id":  eventID,
+			"camera_id": cameraID,
+			"type":      eventType,
+		})
+		wsMsg, _ := json.Marshal(map[string]interface{}{
+			"type":       "alert",
+			"rule_id":    ruleID,
+			"event_id":   eventID,
+			"camera_id":  cameraID,
+			"event_type": eventType,
+			"timestamp":  now,
+		})
+		a.hub.BroadcastToOrg(orgID, wsMsg)
+	}
+}
+
+func eventTypeAllowed(eventType string, allowed []string) bool {
+	for _, t := range allowed {
+		if t == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func withinSchedule(now time.Time, from sql.NullString, to sql.NullString, days pq.Int64Array) bool {
+	if len(days) > 0 {
+		wd := int64(now.Weekday())
+		ok := false
+		for _, d := range days {
+			if d == wd {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+
+	if !from.Valid && !to.Valid {
+		return true
+	}
+
+	nowSecs := now.UTC().Hour()*3600 + now.UTC().Minute()*60 + now.UTC().Second()
+	fromSecs, hasFrom := parseTimeOfDay(from)
+	toSecs, hasTo := parseTimeOfDay(to)
+
+	if hasFrom && hasTo {
+		if fromSecs <= toSecs {
+			return nowSecs >= fromSecs && nowSecs <= toSecs
+		}
+		// overnight window
+		return nowSecs >= fromSecs || nowSecs <= toSecs
+	}
+	if hasFrom {
+		return nowSecs >= fromSecs
+	}
+	if hasTo {
+		return nowSecs <= toSecs
+	}
+	return true
+}
+
+func parseTimeOfDay(v sql.NullString) (int, bool) {
+	if !v.Valid {
+		return 0, false
+	}
+	s := v.String
+	t, err := time.Parse("15:04:05", s)
+	if err != nil {
+		t, err = time.Parse("15:04", s)
+		if err != nil {
+			return 0, false
+		}
+	}
+	return t.Hour()*3600 + t.Minute()*60 + t.Second(), true
 }
 
 // ─── WebSocket hub ────────────────────────────────────────────────────────────
@@ -797,107 +1349,123 @@ func (a *App) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // ─── JWT middleware ───────────────────────────────────────────────────────────
 
 type Claims struct {
-	UserID string
-	OrgID  string
-	Email  string
-	Roles  []string
+	Subject string
+	OrgID   string
+	Email   string
+	Roles   []string
 }
 
-type ctxKey string
-
-const claimsKey ctxKey = "claims"
-
 func claimsFromCtx(ctx context.Context) Claims {
-	if c, ok := ctx.Value(claimsKey).(Claims); ok {
-		return c
+	if c := auth.ClaimsFromContext(ctx); c != nil {
+		return Claims{
+			Subject: c.Subject,
+			OrgID:   c.OrgID,
+			Email:   c.Email,
+			Roles:   c.Roles,
+		}
 	}
 	return Claims{}
 }
 
-// JWKSCache fetches and caches Keycloak's public keys for JWT validation.
-type JWKSCache struct {
-	url      string
-	mu       sync.RWMutex
-	keys     map[string]interface{} // kid → public key
-	fetchedAt time.Time
-	ttl      time.Duration
-}
-
-func NewJWKSCache(url string, ttl time.Duration) *JWKSCache {
-	return &JWKSCache{url: url, ttl: ttl, keys: map[string]interface{}{}}
-}
-
-func (j *JWKSCache) GetKey(kid string) (interface{}, error) {
-	j.mu.RLock()
-	if time.Since(j.fetchedAt) < j.ttl {
-		if k, ok := j.keys[kid]; ok {
-			j.mu.RUnlock()
-			return k, nil
-		}
+// sanitizeFrigateName matches the agent's camera key format.
+func sanitizeFrigateName(name, id string) string {
+	shortID := strings.ReplaceAll(id, "-", "")
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
 	}
-	j.mu.RUnlock()
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + 32
+		}
+		return '_'
+	}, name)
+	for strings.Contains(safe, "__") {
+		safe = strings.ReplaceAll(safe, "__", "_")
+	}
+	safe = strings.Trim(safe, "_")
+	return fmt.Sprintf("%s_%s", safe, shortID)
+}
 
-	// Re-fetch JWKS
-	resp, err := http.Get(j.url)
+// generateWireGuardKeypair creates a WireGuard X25519 keypair.
+func generateWireGuardKeypair() (privateKey string, publicKey string, err error) {
+	var priv [32]byte
+	if _, err := rand.Read(priv[:]); err != nil {
+		return "", "", err
+	}
+	// Clamp per RFC 7748.
+	priv[0] &= 248
+	priv[31] = (priv[31] & 127) | 64
+
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var jwks struct {
-		Keys []json.RawMessage `json:"keys"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		return nil, err
+		return "", "", err
 	}
 
-	j.mu.Lock()
-	j.fetchedAt = time.Now()
-	// In production: parse RSA public keys from JWK format
-	// For brevity, this returns a placeholder — use a proper JWK library
-	// e.g. github.com/lestrrat-go/jwx/v2
-	j.mu.Unlock()
-
-	return nil, fmt.Errorf("key %s not found", kid)
+	return base64.StdEncoding.EncodeToString(priv[:]),
+		base64.StdEncoding.EncodeToString(pub), nil
 }
 
-func (a *App) jwtMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "missing token", 401)
-			return
-		}
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+// allocateWGIP assigns the next available 10.10.0.x address.
+func allocateWGIP(ctx context.Context, tx *sql.Tx) (string, error) {
+	var maxOctet sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT MAX((split_part(wg_ip::text, '.', 4))::int) FROM devices WHERE wg_ip IS NOT NULL`).
+		Scan(&maxOctet); err != nil {
+		return "", err
+	}
+	start := int64(10)
+	if maxOctet.Valid && maxOctet.Int64 >= start {
+		start = maxOctet.Int64 + 1
+	}
+	if start >= 255 {
+		return "", fmt.Errorf("wireguard address pool exhausted")
+	}
+	return fmt.Sprintf("10.10.0.%d", start), nil
+}
 
-		// Parse without verification first to get claims structure
-		// In production: verify signature using JWKS from Keycloak
-		token, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
-		if err != nil {
-			http.Error(w, "invalid token", 401)
-			return
-		}
+// addWireGuardPeer inserts a new peer into the WireGuard server container.
+func addWireGuardPeer(cfg Config, publicKey, wgIP string) error {
+	if publicKey == "" || wgIP == "" {
+		return fmt.Errorf("missing peer data")
+	}
+	cmd := exec.Command(
+		"docker", "exec", cfg.WGContainer, "wg", "set", cfg.WGInterface,
+		"peer", publicKey, "allowed-ips", wgIP+"/32",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wg set failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// Persist peer to config so it survives container restarts.
+	save := exec.Command(
+		"docker", "exec", cfg.WGContainer, "wg-quick", "save", cfg.WGInterface,
+	)
+	if out, err = save.CombinedOutput(); err != nil {
+		return fmt.Errorf("wg-quick save failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
-		mapClaims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			http.Error(w, "invalid claims", 401)
-			return
-		}
+// pqArray is a minimal helper to pass string slices to pq without importing it globally.
+func auditLog(db *sql.DB, orgID, actor, action, resourceType, resourceID string, payload interface{}) error {
+	data, _ := json.Marshal(payload)
+	_, err := db.Exec(
+		`INSERT INTO audit_log (org_id, actor, action, resource_type, resource_id, payload)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		orgID, actor, action, resourceType, resourceID, data)
+	return err
+}
 
-		// Extract org_id from custom claim (set in Keycloak via mapper)
-		orgID, _ := mapClaims["org_id"].(string)
-		userID, _ := mapClaims["sub"].(string)
-		email, _ := mapClaims["email"].(string)
-
-		claims := Claims{
-			UserID: userID,
-			OrgID:  orgID,
-			Email:  email,
-		}
-
-		ctx := context.WithValue(r.Context(), claimsKey, claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func auditLogTx(tx *sql.Tx, orgID, actor, action, resourceType, resourceID string, payload interface{}) error {
+	data, _ := json.Marshal(payload)
+	_, err := tx.Exec(
+		`INSERT INTO audit_log (org_id, actor, action, resource_type, resource_id, payload)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		orgID, actor, action, resourceType, resourceID, data)
+	return err
 }
 
 // ─── MQTT ─────────────────────────────────────────────────────────────────────
@@ -905,7 +1473,7 @@ func (a *App) jwtMiddleware(next http.Handler) http.Handler {
 func connectMQTT(cfg Config) mqtt.Client {
 	opts := mqtt.NewClientOptions().
 		AddBroker(cfg.MQTTBroker).
-		SetClientID("cam-api-"+uuid.New().String()).
+		SetClientID("cam-api-" + uuid.New().String()).
 		SetUsername(cfg.MQTTUser).
 		SetPassword(cfg.MQTTPassword).
 		SetAutoReconnect(true).
@@ -940,6 +1508,28 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func parseLimitOffset(r *http.Request, def, max int) (int, int) {
+	limit := def
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 1 {
+				n = 1
+			}
+			if n > max {
+				n = max
+			}
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	return limit, offset
 }
 
 func mustEnv(k string) string {

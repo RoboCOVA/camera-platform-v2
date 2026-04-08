@@ -1,15 +1,15 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, CSSProperties } from 'react'
 import { useSession } from 'next-auth/react'
 import useSWR from 'swr'
-import { RefreshCw, WifiOff, LayoutGrid, List, Filter } from 'lucide-react'
+import { RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { cameras as cameraAPI, sites as sitesAPI, connectEventStream } from '@/lib/api'
 import type { Camera, Site, WSEvent } from '@/lib/api'
 import { CameraPlayer } from '@/components/camera/CameraPlayer'
 import { CameraDetailModal } from '@/components/camera/CameraDetailModal'
 import { formatDistanceToNow } from 'date-fns'
 
-const fetcher = (fn: () => Promise<any>) => fn()
+const PAGE_SIZE = 50
 
 export default function CamerasPage() {
   const { data: session } = useSession()
@@ -19,11 +19,16 @@ export default function CamerasPage() {
   const [liveStatuses, setLiveStatuses] = useState<Record<string, 'online' | 'offline'>>({})
   const [wsConnected, setWsConnected] = useState(false)
   const [recentEvents, setRecentEvents] = useState<Record<string, WSEvent>>({})
+  const [page, setPage] = useState(0)
+  const [showCreate, setShowCreate] = useState(false)
 
-  const { data: cameraList, isLoading: camsLoading, mutate: mutateCameras } =
-    useSWR(['cameras', selectedSite],
-      () => cameraAPI.list(selectedSite === 'all' ? undefined : selectedSite),
-      { refreshInterval: 30_000 }
+  const { data: cameraPage, isLoading: camsLoading, mutate: mutateCameras } =
+    useSWR(['cameras', selectedSite, page],
+      () => cameraAPI.list(selectedSite === 'all' ? undefined : selectedSite, {
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
+      }),
+      { refreshInterval: page === 0 ? 30_000 : 0 }
     )
 
   const { data: siteList } = useSWR('sites', () => sitesAPI.list())
@@ -49,8 +54,14 @@ export default function CamerasPage() {
     return disconnect
   }, [session?.accessToken])
 
-  const cameras = cameraList ?? []
+  useEffect(() => {
+    setPage(0)
+  }, [selectedSite])
+
+  const cameras = cameraPage?.items ?? []
   const sites = siteList ?? []
+  const total = cameraPage?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   const filteredCameras = selectedSite === 'all'
     ? cameras
@@ -59,6 +70,11 @@ export default function CamerasPage() {
   const onlineCount = cameras.filter(c =>
     (liveStatuses[c.id] ?? c.status) === 'online'
   ).length
+  const canAdmin = (session?.roles ?? []).some(r => r === 'org-owner' || r === 'org-admin')
+
+  useEffect(() => {
+    if (page > totalPages - 1) setPage(0)
+  }, [page, totalPages])
 
   return (
     <div style={{ padding: '24px 28px', minHeight: '100vh' }}>
@@ -70,7 +86,12 @@ export default function CamerasPage() {
             Cameras
           </h1>
           <div style={{ marginTop: 4, fontSize: 13, color: '#64748b' }}>
-            {onlineCount} online · {cameras.length - onlineCount} offline · {cameras.length} total
+            {onlineCount} online · {cameras.length - onlineCount} offline · {cameras.length} shown
+            {total > 0 && (
+              <span style={{ marginLeft: 8, color: '#475569' }}>
+                · {Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+              </span>
+            )}
             {wsConnected
               ? <span style={{ marginLeft: 10, color: '#22c55e', fontSize: 11 }}>● Live</span>
               : <span style={{ marginLeft: 10, color: '#64748b', fontSize: 11 }}>○ Connecting...</span>
@@ -79,6 +100,18 @@ export default function CamerasPage() {
         </div>
 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {canAdmin && (
+            <button
+              onClick={() => setShowCreate(true)}
+              style={{
+                padding: '6px 12px', borderRadius: 8, background: '#1e3a5f',
+                border: '1px solid #2563eb', color: '#93c5fd', cursor: 'pointer',
+                fontSize: 13,
+              }}
+            >
+              Add camera
+            </button>
+          )}
           {/* Layout toggle */}
           <div style={{
             display: 'flex', borderRadius: 8, overflow: 'hidden',
@@ -100,7 +133,7 @@ export default function CamerasPage() {
           </div>
 
           <button
-            onClick={() => mutateCameras()}
+            onClick={() => { setPage(0); mutateCameras() }}
             style={{
               padding: '6px 12px', borderRadius: 8, background: '#1e2535',
               border: '1px solid #1e2535', color: '#94a3b8', cursor: 'pointer',
@@ -139,7 +172,7 @@ export default function CamerasPage() {
       )}
 
       {/* Loading state */}
-      {camsLoading && (
+      {camsLoading && cameras.length === 0 && (
         <div style={{ color: '#64748b', fontSize: 13, padding: '40px 0', textAlign: 'center' }}>
           Loading cameras...
         </div>
@@ -198,11 +231,85 @@ export default function CamerasPage() {
         />
       )}
 
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: '#111624', border: '1px solid #1e2535',
+            borderRadius: 10, padding: 6,
+          }}>
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={page === 0}
+              style={{
+                padding: '6px 10px', borderRadius: 6, fontSize: 12,
+                background: page === 0 ? '#141827' : '#1e2535',
+                border: '1px solid #1e2535',
+                color: page === 0 ? '#475569' : '#94a3b8',
+                cursor: page === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Prev
+            </button>
+            {Array.from({ length: totalPages }, (_, i) => i).slice(0, 7).map(p => (
+              <button
+                key={p}
+                onClick={() => setPage(p)}
+                style={{
+                  width: 30, height: 30, borderRadius: 6, fontSize: 12,
+                  background: page === p ? '#1e3a5f' : '#1e2535',
+                  border: '1px solid #1e2535',
+                  color: page === p ? '#93c5fd' : '#94a3b8',
+                  cursor: 'pointer',
+                }}
+              >
+                {p + 1}
+              </button>
+            ))}
+            {totalPages > 7 && (
+              <span style={{ color: '#64748b', fontSize: 12, padding: '0 6px' }}>…</span>
+            )}
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              style={{
+                padding: '6px 10px', borderRadius: 6, fontSize: 12,
+                background: page >= totalPages - 1 ? '#141827' : '#1e2535',
+                border: '1px solid #1e2535',
+                color: page >= totalPages - 1 ? '#475569' : '#94a3b8',
+                cursor: page >= totalPages - 1 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Detail modal */}
       {selectedCamera && (
         <CameraDetailModal
           camera={selectedCamera}
           onClose={() => setSelectedCamera(null)}
+          canAdmin={canAdmin}
+          onDeleted={() => {
+            setSelectedCamera(null)
+            setPage(0)
+            mutateCameras()
+          }}
+        />
+      )}
+
+      {showCreate && (
+        <CameraCreateModal
+          sites={sites}
+          onClose={() => setShowCreate(false)}
+          onCreated={() => {
+            setShowCreate(false)
+            setPage(0)
+            mutateCameras()
+          }}
         />
       )}
     </div>
@@ -278,6 +385,127 @@ function CameraListView({ cameras, liveStatuses, recentEvents, onSelect }: {
       </table>
     </div>
   )
+}
+
+function CameraCreateModal({ sites, onClose, onCreated }: {
+  sites: Site[]
+  onClose: () => void
+  onCreated: () => void
+}) {
+  const [name, setName] = useState('')
+  const [siteId, setSiteId] = useState<string>('')
+  const [ip, setIp] = useState('')
+  const [manufacturer, setManufacturer] = useState('')
+  const [model, setModel] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 60,
+      background: 'rgba(0,0,0,0.7)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 20,
+    }}>
+      <div style={{
+        background: '#161b27',
+        border: '1px solid #1e2535',
+        borderRadius: 12,
+        width: '100%',
+        maxWidth: 520,
+        padding: 18,
+      }}>
+        <div style={{ fontSize: 16, fontWeight: 600, color: '#f1f5f9', marginBottom: 12 }}>
+          Add camera
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Camera name"
+            style={inputStyle}
+          />
+          <select
+            value={siteId}
+            onChange={e => setSiteId(e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">No site</option>
+            {sites.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <input
+            value={ip}
+            onChange={e => setIp(e.target.value)}
+            placeholder="IP address (optional)"
+            style={inputStyle}
+          />
+          <input
+            value={manufacturer}
+            onChange={e => setManufacturer(e.target.value)}
+            placeholder="Manufacturer (optional)"
+            style={inputStyle}
+          />
+          <input
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            placeholder="Model (optional)"
+            style={inputStyle}
+          />
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '6px 12px', borderRadius: 8, background: '#1e2535',
+              border: '1px solid #1e2535', color: '#94a3b8', cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={async () => {
+              if (!name.trim()) return
+              setSaving(true)
+              try {
+                await cameraAPI.create({
+                  name: name.trim(),
+                  site_id: siteId || undefined,
+                  ip: ip || undefined,
+                  manufacturer: manufacturer || undefined,
+                  model: model || undefined,
+                } as any)
+                onCreated()
+              } finally {
+                setSaving(false)
+              }
+            }}
+            disabled={saving || !name.trim()}
+            style={{
+              padding: '6px 12px', borderRadius: 8,
+              background: saving || !name.trim() ? '#1a2230' : '#1e3a5f',
+              border: '1px solid #2563eb', color: '#93c5fd',
+              cursor: saving || !name.trim() ? 'not-allowed' : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {saving ? 'Saving...' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const inputStyle: CSSProperties = {
+  padding: '8px 10px',
+  borderRadius: 8,
+  border: '1px solid #1e2535',
+  background: '#0f1117',
+  color: '#e2e8f0',
+  fontSize: 13,
 }
 
 // ─── Small components ─────────────────────────────────────────────────────────

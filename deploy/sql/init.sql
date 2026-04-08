@@ -50,6 +50,7 @@ CREATE TABLE devices (
   last_seen       TIMESTAMPTZ,
   -- Network (WireGuard)
   wg_ip           INET,          -- assigned WireGuard IP for this device
+  wg_public_key   TEXT,          -- device WireGuard public key
   -- Frigate
   frigate_url     TEXT,          -- http://wg-ip:5000 — only reachable via WireGuard
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
