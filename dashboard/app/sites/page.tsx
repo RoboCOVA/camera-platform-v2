@@ -10,12 +10,12 @@ export default function SitesPage() {
   const [saving, setSaving] = useState(false)
 
   const { data: siteList, mutate } = useSWR('sites-page', () => sitesAPI.list())
-  const { data: cameraList } = useSWR('cameras-sites', () => cameraAPI.list())
+  const { data: cameraPage } = useSWR('cameras-sites', () => cameraAPI.list(undefined, { limit: 500, offset: 0 }))
 
   const camerasPerSite = Object.fromEntries(
     (siteList ?? []).map(s => [
       s.id,
-      (cameraList ?? []).filter(c => c.site_id === s.id),
+      (cameraPage?.items ?? []).filter(c => c.site_id === s.id),
     ])
   )
 

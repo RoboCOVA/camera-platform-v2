@@ -7,21 +7,29 @@ import type { CamEvent, WSEvent, Camera } from '@/lib/api'
 import { formatDistanceToNow, format } from 'date-fns'
 
 const EVENT_TYPES = ['all', 'person', 'car', 'bicycle', 'motion']
+const PAGE_SIZE = 50
 
 export default function EventsPage() {
   const { data: session } = useSession()
   const [typeFilter, setTypeFilter] = useState('all')
   const [liveEvents, setLiveEvents] = useState<WSEvent[]>([])
   const [wsConnected, setWsConnected] = useState(false)
+  const [page, setPage] = useState(0)
 
-  const { data: historicalEvents } = useSWR(
-    ['events', typeFilter],
-    () => eventsAPI.list(typeFilter !== 'all' ? { type: typeFilter } : undefined),
-    { refreshInterval: 30_000 }
+  const { data: eventPage } = useSWR(
+    ['events', typeFilter, page],
+    () => eventsAPI.list({
+      type: typeFilter !== 'all' ? typeFilter : undefined,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+    }),
+    { refreshInterval: page === 0 ? 30_000 : 0 }
   )
 
-  const { data: cameraList } = useSWR('cameras-for-events', () => cameraAPI.list())
-  const cameraMap = Object.fromEntries((cameraList ?? []).map(c => [c.id, c]))
+  const { data: cameraPage } = useSWR('cameras-for-events', () =>
+    cameraAPI.list(undefined, { limit: 500, offset: 0 })
+  )
+  const cameraMap = Object.fromEntries((cameraPage?.items ?? []).map(c => [c.id, c]))
 
   // Real-time event stream
   useEffect(() => {
@@ -38,6 +46,18 @@ export default function EventsPage() {
     )
     return disconnect
   }, [session?.accessToken, typeFilter])
+
+  useEffect(() => {
+    setPage(0)
+  }, [typeFilter])
+
+  const historicalEvents = eventPage?.items ?? []
+  const total = eventPage?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+
+  useEffect(() => {
+    if (page > totalPages - 1) setPage(0)
+  }, [page, totalPages])
 
   return (
     <div style={{ padding: '24px 28px' }}>
@@ -59,6 +79,11 @@ export default function EventsPage() {
           {wsConnected
             ? '● Receiving live events'
             : '○ Connecting to event stream...'}
+          {total > 0 && (
+            <span style={{ marginLeft: 10, color: '#475569' }}>
+              · {Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+            </span>
+          )}
         </div>
       </div>
 
@@ -100,7 +125,7 @@ export default function EventsPage() {
         ))}
 
         {/* Historical events */}
-        {(historicalEvents ?? []).map(ev => (
+        {historicalEvents.map(ev => (
           <EventCard
             key={ev.id}
             id={ev.id}
@@ -113,18 +138,74 @@ export default function EventsPage() {
           />
         ))}
 
-        {!historicalEvents && (
+        {!eventPage && historicalEvents.length === 0 && (
           <div style={{ color: '#64748b', fontSize: 13, padding: '40px 0', textAlign: 'center' }}>
             Loading events...
           </div>
         )}
 
-        {historicalEvents?.length === 0 && liveEvents.length === 0 && (
+        {historicalEvents.length === 0 && liveEvents.length === 0 && eventPage && (
           <div style={{ color: '#64748b', fontSize: 13, padding: '60px 0', textAlign: 'center' }}>
             No events yet. Events will appear here as cameras detect motion and objects.
           </div>
         )}
       </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: '#111624', border: '1px solid #1e2535',
+            borderRadius: 10, padding: 6,
+          }}>
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={page === 0}
+              style={{
+                padding: '6px 10px', borderRadius: 6, fontSize: 12,
+                background: page === 0 ? '#141827' : '#1e2535',
+                border: '1px solid #1e2535',
+                color: page === 0 ? '#475569' : '#94a3b8',
+                cursor: page === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Prev
+            </button>
+            {Array.from({ length: totalPages }, (_, i) => i).slice(0, 7).map(p => (
+              <button
+                key={p}
+                onClick={() => setPage(p)}
+                style={{
+                  width: 30, height: 30, borderRadius: 6, fontSize: 12,
+                  background: page === p ? '#1e3a5f' : '#1e2535',
+                  border: '1px solid #1e2535',
+                  color: page === p ? '#93c5fd' : '#94a3b8',
+                  cursor: 'pointer',
+                }}
+              >
+                {p + 1}
+              </button>
+            ))}
+            {totalPages > 7 && (
+              <span style={{ color: '#64748b', fontSize: 12, padding: '0 6px' }}>…</span>
+            )}
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              style={{
+                padding: '6px 10px', borderRadius: 6, fontSize: 12,
+                background: page >= totalPages - 1 ? '#141827' : '#1e2535',
+                border: '1px solid #1e2535',
+                color: page >= totalPages - 1 ? '#475569' : '#94a3b8',
+                cursor: page >= totalPages - 1 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

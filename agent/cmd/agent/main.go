@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,9 +20,9 @@ import (
 // AgentConfig holds runtime configuration loaded from env or config file.
 type AgentConfig struct {
 	// Identity
-	DeviceID   string // read from /etc/cam/device.id, generated on first boot
-	SiteID     string // set during provisioning
-	OrgID      string // set during provisioning
+	DeviceID string // read from /etc/cam/device.id, generated on first boot
+	SiteID   string // set during provisioning
+	OrgID    string // set during provisioning
 
 	// Control plane
 	ControlPlaneURL string // e.g. https://api.yourdomain.com
@@ -78,6 +79,7 @@ func main() {
 		log.Printf("[agent] discovery error (continuing): %v", err)
 	}
 	log.Printf("[agent] discovered %d cameras", len(cameras))
+	state := &cameraState{cameras: cameras}
 
 	// 3. Write Frigate config and start it
 	frigateConfig := frigate.Generate(cameras, frigateOpts)
@@ -90,18 +92,18 @@ func main() {
 	}
 
 	// 4. Register cameras with control plane
-	if err := registerCameras(ctx, cfg, cameras); err != nil {
+	if err := registerCameras(ctx, cfg, state.Get()); err != nil {
 		log.Printf("[agent] register cameras: %v", err)
 	}
 
 	// 5. Start heartbeat loop
-	go heartbeatLoop(ctx, cfg, cameras)
+	go heartbeatLoop(ctx, cfg, state)
 
 	// 6. Start periodic re-discovery (picks up new cameras without restart)
-	go rediscoveryLoop(ctx, cfg, cameras, frigateConfig, frigateOpts, frigateManager)
+	go rediscoveryLoop(ctx, cfg, state, frigateConfig, frigateOpts, frigateManager)
 
 	// 7. Serve local health endpoint
-	go serveHealth(cfg.DeviceID, cameras)
+	go serveHealth(cfg.DeviceID, state)
 
 	log.Println("[agent] running. Press Ctrl+C to stop.")
 	<-ctx.Done()
@@ -126,7 +128,7 @@ func discoverCameras(ctx context.Context, cfg AgentConfig) ([]discovery.Camera, 
 }
 
 // heartbeatLoop posts device status to the control plane every 30s.
-func heartbeatLoop(ctx context.Context, cfg AgentConfig, cameras []discovery.Camera) {
+func heartbeatLoop(ctx context.Context, cfg AgentConfig, state *cameraState) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -135,7 +137,7 @@ func heartbeatLoop(ctx context.Context, cfg AgentConfig, cameras []discovery.Cam
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := sendHeartbeat(ctx, cfg, cameras); err != nil {
+			if err := sendHeartbeat(ctx, cfg, state.Get()); err != nil {
 				log.Printf("[heartbeat] error: %v", err)
 			}
 		}
@@ -147,7 +149,7 @@ func heartbeatLoop(ctx context.Context, cfg AgentConfig, cameras []discovery.Cam
 func rediscoveryLoop(
 	ctx context.Context,
 	cfg AgentConfig,
-	current []discovery.Camera,
+	state *cameraState,
 	frigateConfig *frigate.Config,
 	opts frigate.GeneratorOptions,
 	mgr *frigate.Manager,
@@ -166,6 +168,7 @@ func rediscoveryLoop(
 				continue
 			}
 
+			current := state.Get()
 			added, removed := frigate.DiffCameras(current, fresh)
 			if len(added) == 0 && len(removed) == 0 {
 				continue
@@ -189,7 +192,7 @@ func rediscoveryLoop(
 				_ = registerCameras(ctx, cfg, added)
 			}
 
-			current = fresh
+			state.Set(fresh)
 			frigateConfig = newConfig
 		}
 	}
@@ -198,11 +201,11 @@ func rediscoveryLoop(
 // ─── Control plane API calls ──────────────────────────────────────────────────
 
 type heartbeatPayload struct {
-	DeviceID  string    `json:"device_id"`
-	SiteID    string    `json:"site_id,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	DeviceID  string         `json:"device_id"`
+	SiteID    string         `json:"site_id,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
 	Cameras   []cameraStatus `json:"cameras"`
-	AgentVer  string    `json:"agent_version"`
+	AgentVer  string         `json:"agent_version"`
 }
 
 type cameraStatus struct {
@@ -235,22 +238,22 @@ func sendHeartbeat(ctx context.Context, cfg AgentConfig, cameras []discovery.Cam
 }
 
 type registerCameraPayload struct {
-	DeviceID string             `json:"device_id"`
-	SiteID   string             `json:"site_id,omitempty"`
+	DeviceID string               `json:"device_id"`
+	SiteID   string               `json:"site_id,omitempty"`
 	Cameras  []cameraRegistration `json:"cameras"`
 }
 
 type cameraRegistration struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Manufacturer string `json:"manufacturer"`
-	Model        string `json:"model"`
-	Serial       string `json:"serial"`
-	IP           string `json:"ip"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Manufacturer  string `json:"manufacturer"`
+	Model         string `json:"model"`
+	Serial        string `json:"serial"`
+	IP            string `json:"ip"`
 	MainStreamURL string `json:"main_stream_url"`
 	SubStreamURL  string `json:"sub_stream_url"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
 }
 
 func registerCameras(ctx context.Context, cfg AgentConfig, cameras []discovery.Camera) error {
@@ -308,17 +311,38 @@ func postJSON(ctx context.Context, url, key string, payload interface{}) error {
 
 // ─── Local health server ──────────────────────────────────────────────────────
 
-func serveHealth(deviceID string, cameras []discovery.Camera) {
+func serveHealth(deviceID string, state *cameraState) {
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		cams := state.Get()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"device_id": deviceID,
-			"cameras":   len(cameras),
+			"cameras":   len(cams),
 			"status":    "ok",
 			"time":      time.Now().UTC(),
 		})
 	})
 	log.Fatal(http.ListenAndServe(":8090", nil))
+}
+
+type cameraState struct {
+	mu      sync.RWMutex
+	cameras []discovery.Camera
+}
+
+func (s *cameraState) Get() []discovery.Camera {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]discovery.Camera, len(s.cameras))
+	copy(out, s.cameras)
+	return out
+}
+
+func (s *cameraState) Set(cams []discovery.Camera) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cameras = make([]discovery.Camera, len(cams))
+	copy(s.cameras, cams)
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────

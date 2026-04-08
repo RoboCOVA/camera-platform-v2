@@ -49,6 +49,13 @@ export interface Org {
   plan: string
 }
 
+export interface Page<T> {
+  items: T[]
+  total: number
+  limit: number
+  offset: number
+}
+
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
 async function apiFetch<T>(
@@ -89,13 +96,20 @@ async function apiFetch<T>(
 // ─── Cameras ─────────────────────────────────────────────────────────────────
 
 export const cameras = {
-  list: (siteId?: string) => {
-    const qs = siteId ? `?site_id=${siteId}` : ''
-    return apiFetch<Camera[]>(`/api/cameras${qs}`)
+  list: (siteId?: string, params?: { limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams()
+    if (siteId) sp.set('site_id', siteId)
+    if (params?.limit != null) sp.set('limit', String(params.limit))
+    if (params?.offset != null) sp.set('offset', String(params.offset))
+    const qs = sp.toString()
+    return apiFetch<Page<Camera>>(`/api/cameras${qs ? `?${qs}` : ''}`)
   },
   get: (id: string) => apiFetch<Camera>(`/api/cameras/${id}`),
   update: (id: string, body: Partial<Pick<Camera, 'name' | 'site_id'>>) =>
     apiFetch<void>(`/api/cameras/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  create: (body: Partial<Camera> & { name: string }) =>
+    apiFetch<{ id: string }>(`/api/cameras`, { method: 'POST', body: JSON.stringify(body) }),
+  delete: (id: string) => apiFetch<void>(`/api/cameras/${id}`, { method: 'DELETE' }),
   streamUrl: (id: string) => `${API_URL}/api/stream/${id}/hls/live.m3u8`,
   snapshotUrl: (id: string) => `${API_URL}/api/cameras/${id}/snapshot`,
 }
@@ -112,9 +126,9 @@ export const sites = {
 // ─── Events ───────────────────────────────────────────────────────────────────
 
 export const events = {
-  list: (params?: { camera_id?: string; type?: string }) => {
+  list: (params?: { camera_id?: string; type?: string; limit?: number; offset?: number }) => {
     const qs = params ? '?' + new URLSearchParams(params as any).toString() : ''
-    return apiFetch<CamEvent[]>(`/api/events${qs}`)
+    return apiFetch<Page<CamEvent>>(`/api/events${qs}`)
   },
 }
 

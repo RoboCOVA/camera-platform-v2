@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import useSWR from 'swr'
 import { Bell, Plus, Trash2, X, ToggleLeft, ToggleRight } from 'lucide-react'
-import { alertRules, cameras as cameraAPI, sites as sitesAPI } from '@/lib/api'
+import { alertRules, sites as sitesAPI } from '@/lib/api'
 import type { AlertRule, Camera, Site } from '@/lib/api'
 
 const EVENT_TYPES = ['person', 'car', 'bicycle', 'motion', 'offline']
@@ -21,7 +21,6 @@ export default function AlertsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const { data: rules, mutate } = useSWR('alert-rules', () => alertRules.list())
-  const { data: cameraList } = useSWR('cameras-alerts', () => cameraAPI.list())
   const { data: siteList } = useSWR('sites-alerts', () => sitesAPI.list())
 
   const handleCreate = async () => {
