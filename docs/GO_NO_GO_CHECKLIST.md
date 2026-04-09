@@ -8,6 +8,7 @@ All items must be checked before production launch.
 - Dashboard health endpoint returns 200
 - Keycloak health is green
 - Metrics are reachable from allowlisted IPs
+- Synthetic edge device simulation succeeds in staging
 
 ## Data & Storage
 
@@ -27,6 +28,7 @@ All items must be checked before production launch.
 - Alerting rules deployed and validated
 - On-call escalation path confirmed
 - Commissioning runbook reviewed
+- Dashboard E2E (Playwright) pass in staging
 
 ## Pilot Proof
 
