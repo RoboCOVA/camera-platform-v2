@@ -226,6 +226,18 @@ func (a *App) handleDeviceHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch device to validate key and get device ID for camera updates
+	var deviceID string
+	if err := a.db.QueryRowContext(r.Context(),
+		`SELECT id FROM devices WHERE device_key = $1`, deviceKey).
+		Scan(&deviceID); err == sql.ErrNoRows {
+		http.Error(w, "unknown device", 403)
+		return
+	} else if err != nil {
+		http.Error(w, "internal error", 500)
+		return
+	}
+
 	var payload struct {
 		DeviceID string `json:"device_id"`
 		Cameras  []struct {
@@ -248,6 +260,41 @@ func (a *App) handleDeviceHeartbeat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[heartbeat] db: %v", err)
 		http.Error(w, "internal error", 500)
 		return
+	}
+
+	// Update camera statuses for this device (if any sent)
+	if len(payload.Cameras) > 0 {
+		var allIDs []string
+		var onlineIDs []string
+		var offlineIDs []string
+		for _, cam := range payload.Cameras {
+			if cam.ID == "" {
+				continue
+			}
+			allIDs = append(allIDs, cam.ID)
+			if cam.Online {
+				onlineIDs = append(onlineIDs, cam.ID)
+			} else {
+				offlineIDs = append(offlineIDs, cam.ID)
+			}
+		}
+
+		if len(onlineIDs) > 0 {
+			_, _ = a.db.ExecContext(r.Context(), `
+				UPDATE cameras SET status='online', last_seen=NOW()
+				WHERE device_id=$1 AND id = ANY($2)`, deviceID, pq.Array(onlineIDs))
+		}
+		if len(offlineIDs) > 0 {
+			_, _ = a.db.ExecContext(r.Context(), `
+				UPDATE cameras SET status='offline', last_seen=NOW()
+				WHERE device_id=$1 AND id = ANY($2)`, deviceID, pq.Array(offlineIDs))
+		}
+		// Mark cameras missing from heartbeat as offline
+		if len(allIDs) > 0 {
+			_, _ = a.db.ExecContext(r.Context(), `
+				UPDATE cameras SET status='offline'
+				WHERE device_id=$1 AND NOT (id = ANY($2))`, deviceID, pq.Array(allIDs))
+		}
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "ok"})

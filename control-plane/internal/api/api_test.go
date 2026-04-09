@@ -306,8 +306,7 @@ func TestHeartbeat_UnknownDeviceKey(t *testing.T) {
 	ts := newTestServer(t)
 	resp := ts.post(t, "/api/devices/heartbeat", `{"device_id":"x"}`,
 		map[string]string{"X-Device-Key": "totally-unknown-key"})
-	// Should succeed silently (UPDATE matches 0 rows but doesn't error)
-	testutil.AssertStatus(t, resp, 200)
+	testutil.AssertStatus(t, resp, 403)
 }
 
 // ─── Device cameras registration ──────────────────────────────────────────────

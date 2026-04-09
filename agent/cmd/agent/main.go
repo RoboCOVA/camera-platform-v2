@@ -43,7 +43,7 @@ func loadConfig() AgentConfig {
 	cfg := AgentConfig{
 		DeviceID:          getOrCreateDeviceID("/etc/cam/device.id"),
 		ControlPlaneURL:   mustEnv("CAM_CONTROL_URL"),
-		ControlPlaneKey:   os.Getenv("CAM_CONTROL_KEY"),
+		ControlPlaneKey:   mustEnv("CAM_CONTROL_KEY"),
 		FrigateConfigPath: getEnvOr("CAM_FRIGATE_CONFIG", "/etc/frigate/frigate.yml"),
 		DataPath:          getEnvOr("CAM_DATA_PATH", "/data"),
 		DiscoverySubnet:   os.Getenv("CAM_SUBNET"), // optional
@@ -96,7 +96,10 @@ func main() {
 		log.Printf("[agent] register cameras: %v", err)
 	}
 
-	// 5. Start heartbeat loop
+	// 5. Send initial heartbeat and start loop
+	if err := sendHeartbeat(ctx, cfg, state.Get()); err != nil {
+		log.Printf("[heartbeat] initial error: %v", err)
+	}
 	go heartbeatLoop(ctx, cfg, state)
 
 	// 6. Start periodic re-discovery (picks up new cameras without restart)
@@ -187,10 +190,8 @@ func rediscoveryLoop(
 				log.Printf("[rediscovery] reload frigate: %v", err)
 			}
 
-			// Update control plane
-			if len(added) > 0 {
-				_ = registerCameras(ctx, cfg, added)
-			}
+			// Update control plane with full camera list (new + existing)
+			_ = registerCameras(ctx, cfg, fresh)
 
 			state.Set(fresh)
 			frigateConfig = newConfig
